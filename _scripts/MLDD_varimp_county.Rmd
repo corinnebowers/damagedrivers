@@ -5,7 +5,7 @@ date: "2023-04-18"
 ---
 
 ```{r setup, include = FALSE}
-knitr::opts_knit$set(root.dir = '/scratch/users/cbowers/6-MLDD/')
+knitr::opts_knit$set(root.dir = 'D:/6-MLDD/')
 # knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
 knitr::opts_chunk$set(results = 'hold', fig.show = 'hold', fig.align = 'center')
 # rm(list=ls())
@@ -20,256 +20,649 @@ knitr::opts_chunk$set(results = 'hold', fig.show = 'hold', fig.align = 'center')
 source('_data/setup.R')
 
 require(randomForest)
-require(patchwork)
-require(pROC)
 require(pdp)
 require(BAMMtools)
-
-```
-
-```{r}
-dimension <- matrix(c(
-  'H', 'maxivt', 'Maximum IVT',
-  'H', 'duration', 'AR Duration', 
-  'H', 'cat', 'AR Category',
-  'H', 'precip.total', 'AR Total Precipitation',
-  'H', 'precip.max', 'AR Max Hourly Precipitation',
-  'H', 'precip_lag03', '3-Day Lagged Total Precipitation',
-  'H', 'precip_lag07', '7-Day Lagged Total Precipitation',
-  'H', 'precip_lag14', '14-Day Lagged Total Precipitation',
-  'H', 'precip_lag30', '30-Day Lagged Total Precipitation',
-  'H', 'sm_lag03', '3-Day Lagged Average Soil Moisture',
-  'H', 'sm_lag07', '7-Day Lagged Average Soil Moisture',
-  'H', 'sm_lag14', '14-Day Lagged Average Soil Moisture',
-  'H', 'sm_lag30', '30-Day Lagged Average Soil Moisture',
-  'H', 'PDO', 'PDO Climate Index',
-  'H', 'ENSO', 'ENSO Climate Index',
-  'H', 'imperv', 'Percent Impervious Surface Cover',
-  'H', 'developed', 'Percent Developed Land Cover',
-  'H', 'wetlands', 'Percent Wetlands Land Cover',
-  'H', 'elev', 'Mean Elevation',
-  'H', 'slope', 'Mean Terrain Slope',
-  'E', 'pop', 'Total Population',
-  'E', 'popdensity', 'Population Density',
-  'E', 'hu', 'Total Housing Units',
-  'E', 'pct_floodplain', 'Percent Land Area in Floodplain',
-  'E', 'pop_pct_floodplain', 'Percent Population in Floodplain',
-  'E', 'hu_pct_floodplain', 'Percent Housing Units in Floodplain',
-  'V', 'cdc_theme1', 'SVI1 - Socioeconomic Status Index',
-  'V', 'cdc_theme2', 'SVI2 - Household Characteristics Index',
-  'V', 'cdc_theme3', 'SVI3 - Racial & Ethnic Minority Status Index',
-  'V', 'cdc_theme4', 'SVI4 - Housing Type & Transportation Index',
-  'V', 'cal_polburd', 'CalEnviroScreen Pollution Burden',
-  'V', 'cal_popchar', 'CalEnviroScreen Population Characteristics',
-  'V', 'pct_dac', 'Percent Population in Disadvantaged Communities',
-  'V', 'hhincome22', 'Median Household Income',
-  'V', 'pre1950', 'Percent Houses Built Before 1950',
-  'V', 'pre1960', 'Percent Houses Built Before 1960',
-  'V', 'pre1970', 'Percent Houses Built Before 1970',
-  'V', 'pre1980', 'Percent Houses Built Before 1980',
-  'V', 'pre1990', 'Percent Houses Built Before 1990',
-  'V', 'pre2000', 'Percent Houses Built Before 2000',
-  'V', 'pct_sfh', 'Percent Single Family Homes',
-  'V', 'pct_ownocc', 'Percent Owner-Occupied Homes',
-  'V', 'pct_mobile', 'Percent Mobile Homes',
-  'V', 'disasters', 'Number of Federal Disasters in the Past 3 Years',
-  'V', 'CRS', 'CRS Rating'),
-  ncol = 3, byrow = TRUE) %>% 
-  as.data.frame %>% setNames(c('dim', 'var', 'fullname'))
-dimension
-
-```
-
-## load dataframe
-
-```{r}
-load('_results/county_rfmodel_0424.Rdata')
+require(pROC)
+require(PRROC)
 
 polys <- california %>% 
   arrange(NAME) %>%  
   transmute(id = 1:nrow(.), name = NAME, geometry) 
 
+label_wrap <- function(variable, value) {
+  lapply(strwrap(as.character(value), width=25, simplify=FALSE), 
+         paste, collapse="\n")
+}
+
+```
+
+```{r}
+dimension <- matrix(c(
+  'H', 'maxivt', 'Maximum IVT', T,
+  'H', 'duration', 'AR Duration', T,
+  'H', 'cat', 'AR Category', T,
+  'H', 'logprecip_total', 'AR Total Precipitation', T,
+  'H', 'logprecip_max', 'AR Max Hourly Precipitation', T,
+  'H', 'logprecip_lag03', '3-Day Lagged Total Precipitation', T,
+  'H', 'logprecip_lag07', '7-Day Lagged Total Precipitation', T,
+  'H', 'logprecip_lag14', '14-Day Lagged Total Precipitation', T,
+  'H', 'logprecip_lag30', '30-Day Lagged Total Precipitation', T,
+  'H', 'sm_lag03', '3-Day Lagged Average Soil Moisture', T,
+  'H', 'sm_lag07', '7-Day Lagged Average Soil Moisture', T, 
+  'H', 'sm_lag14', '14-Day Lagged Average Soil Moisture', T, 
+  'H', 'sm_lag30', '30-Day Lagged Average Soil Moisture', T, 
+  'H', 'PDO', 'PDO Climate Index', T, 
+  'H', 'ENSO', 'ENSO Climate Index', T, 
+  'H', 'pct_imperv', '% Impervious Surface Cover', T, 
+  'H', 'pct_developed', '% Developed Land Cover', T, 
+  'H', 'pct_wetlands', '% Wetlands Land Cover', T, 
+  'H', 'elev', 'Mean Elevation', F, 
+  'H', 'slope', 'Mean Terrain Slope', F, 
+  'E', 'logpop', 'Total Population', T, 
+  'E', 'logpopdensity', 'Population Density', T, 
+  'E', 'loghu', 'Total Housing Units', T, 
+  'E', 'pct_floodplain', '% Land Area in Floodplain', F, 
+  'E', 'pop_pct_floodplain', '% Population in Floodplain', F, 
+  'E', 'hu_pct_floodplain', '% Housing Units in Floodplain', F, 
+  'V', 'cdc_theme1', 'SVI1 - Socioeconomic Status Index', T, 
+  'V', 'cdc_theme2', 'SVI2 - Household Characteristics Index', T, 
+  'V', 'cdc_theme3', 'SVI3 - Racial & Ethnic Minority Status Index', T, 
+  'V', 'cdc_theme4', 'SVI4 - Housing Type & Transportation Index', T, 
+  'V', 'cal_polburd', 'CalEnviroScreen Pollution Burden', F, 
+  'V', 'cal_popchar', 'CalEnviroScreen Population Characteristics', F, 
+  'V', 'pct_dac', '% Population in Disadvantaged Communities', F, 
+  'V', 'hhincome22', 'Median Household Income', T, 
+  'V', 'pre1980', '% Houses Built Before 1980', F, 
+  'V', 'med_struct_age', 'Median Year Built', F, 
+  'V', 'pct_sfh', '% Single Family Homes', F, 
+  'V', 'pct_ownocc', '% Owner-Occupied Homes', F,
+  'V', 'pct_mobile', '% Mobile Homes', F,
+  'V', 'disasters', 'Number of Federal Disasters in the Past 3 Years', T,
+  'V', 'CRS', 'CRS Rating', T),
+  ncol = 4, byrow = TRUE) %>% 
+  as.data.frame %>% setNames(c('dim', 'var', 'fullname', 'overtime'))
+
+# colors.hev <- scico(5, palette = 'lajolla')[2:4]
+colors.hev <- scico(6, palette = 'roma')[c(3,5,6)]
+# colors.hev <- c(
+#   rgb(242,168,168, maxColorValue = 255), 
+#   rgb(164,24,24, maxColorValue = 255),
+#   rgb(75,13,13, maxColorValue = 255))
+
+```
+
+## load sherlock files
+
+```{r}
+i <- 0
+
+load(paste0('_results/county_rfmodel_',i,'.Rdata'))
+# load(paste0('_results/county_pdp_',i,'.Rdata'))
+load(paste0('_results/county_iml_',i,'.Rdata'))
+load(paste0('_results/county_shap_',i,'.Rdata'))
+
+samp <- sample(1:nrow(df.pca), 500)
+vars <- dimension$var
+
+```
+
+```{r}
+names(df.pca)
+
+(df.pca$pct_sfh*(10^df.pca$logpop-1)) %>% unique
+
+## how many Claiforni
+df.pca %>% 
+  mutate(number_sfh = pct_sfh*(10^logpop-1)) %>% 
+  summarize(pop = sum(10^logpop-1), sfh = sum(number_sfh)) %>% 
+  mutate(pct = sfh/pop)
+
+## how many policyholders live in single family homes?
+policies %>% 
+  count(occupancyType==1 & !is.na(occupancyType)) %>% 
+  mutate(pct = n/sum(n))
 ```
 
 # model performance
 
 ```{r}
-confusionMatrix(
-  data = predict(f.rf, df.test %>% mutate(cat = as.numeric(cat), CRS = as.numeric(CRS))), 
-  reference = df.test$y)
+data <- 
+  predict(f.rf$finalModel, df.test, type = 'prob') %>% 
+  as.data.frame %>% 
+  transmute(pred = yes, obs = df.test$y) %>% 
+  arrange(pred)
+metrics <- 
+  foreach (i = (0:100)/100, .combine = 'rbind') %do% {
+    caret::confusionMatrix(
+      data = factor(ifelse(data$pred > i, 'yes', 'no'), levels = c('no','yes')), 
+      reference = data$obs,
+      positive = 'yes')$byClass %>% c(i = i)
+  } %>% data.frame
 
-data = predict(f.rf, df.test %>% mutate(cat = as.numeric(cat), CRS = as.numeric(CRS)), type = 'prob')
-temp <- roc(response = df.test$y, predictor = data$yes) %>% plot.roc()
-ggplot() + 
-  geom_step(aes(x = 1-temp$specificities, y = temp$sensitivities), size = 0.75) + 
-  scale_x_origin() + scale_y_origin() + 
-  coord_fixed() + geom_parity() + 
+pr.auc <- pr.curve(
+  scores.class0 = data$pred, 
+  weights.class0 = data$obs=='yes')$auc.integral
+g1 <- ggplot(metrics) + 
+  geom_hline(yintercept = sum(df.test$y=='yes')/nrow(df.test), linetype = 'dashed') + 
+  geom_line(aes(x = Recall, y = Precision), size = 0.75) + 
+  scale_x_continuous(limits = c(0,1), expand = expansion(mult = c(0,0.01))) + 
+  scale_y_continuous(limits = c(0,1), expand = expansion(mult = c(0,0.01))) + 
+  ggtitle('Precision-Recall (PR) Curve', subtitle = paste('AUC =', round(pr.auc,3))) + 
+  coord_fixed() + 
+  theme(panel.grid.major = element_line(size = 0.25))
+ 
+roc.auc <- roc(response = data$obs=='yes', predictor = data$pred)$auc %>% toNumber
+g2 <- ggplot(metrics) + 
+  geom_line(aes(x = Specificity, y = Sensitivity), size = 0.75) + 
+  scale_x_reverse(limits = c(1,0), expand = expansion(mult = c(0,0.01))) + 
+  scale_y_continuous(limits = c(0,1), expand = expansion(mult = c(0,0.01))) + 
+  geom_abline(slope = 1, intercept = 1, linetype = 'dashed') + 
+  ggtitle('ROC Curve', subtitle = paste('AUC =', round(roc.auc,3))) + 
+  coord_fixed() + 
   theme(panel.grid.major = element_line(size = 0.25))
 
+g1 + g2
+
 ```
 
-# variable importance
+# feature correlation
+
+```{r fig.width = 9}
+g1 <- cor(df.pca %>% select(-y)) %>% 
+  as.data.frame %>% 
+  rownames_to_column %>% 
+  pivot_longer(-rowname) %>%
+  mutate(rowname = factor(rowname, levels = vars), name = factor(name, levels = rev(vars))) %>% 
+  ggplot() + 
+  geom_tile(aes(x = rowname, y = name, fill = value)) + 
+  scale_fill_scico(palette = 'vik', midpoint = 0, direction = -1) + 
+  scale_x_discrete(position = 'top') + 
+  coord_fixed() + 
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5))
+
+g2 <- cor(df.pca %>% select(-y)) %>% 
+  as.data.frame %>% 
+  rownames_to_column %>% 
+  pivot_longer(-rowname) %>%
+  mutate(rowname = factor(rowname, levels = vars), name = factor(name, levels = rev(vars))) %>% 
+  ggplot() + 
+  geom_tile(aes(x = rowname, y = name, fill = cut(abs(value), c(0,0.8,0.99,1)))) + 
+  scale_fill_manual('', values = c('grey90','red','darkred')) + 
+  scale_x_discrete(position = 'top') + 
+  coord_fixed() + 
+  theme(
+    axis.title = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5))
+
+g1 + g2 
+
+```
+
+# feature importance
+
+## OOB accuracy 
 
 ```{r}
-importance <- f.rf$finalModel$importance %>% 
-  as.data.frame %>% 
-  rownames_to_column(var = 'varnames') %>% 
-  arrange(desc(MeanDecreaseAccuracy))
-vars <- importance$varnames
-
-```
-
-## overall importance contributions 
-
-```{r fig.width = 8, fig.height = 4}
-importance.plot <- importance %>% 
-  full_join(dimension, by = c('varnames' = 'var')) %>% 
+importance.plot <- 
+  importance(f.rf$finalModel, scale = FALSE) %>% 
+  as.data.frame %>%
+  rownames_to_column('varnames') %>% 
+  left_join(dimension, by = c('varnames' = 'var')) %>% 
   arrange(MeanDecreaseAccuracy) %>% 
   mutate(
-    varnames = factor(varnames, levels = .$varnames),
-    fullname = factor(fullname, levels = .$fullname),
+    fullname = factor(fullname, levels = fullname),
     dim = factor(dim, levels = c('H','E','V'))) %>% 
-  arrange(desc(MeanDecreaseAccuracy))
+  arrange(desc(MeanDecreaseAccuracy)) 
 
-g1 <- ggplot(importance.plot[1:10,]) + 
+g1 <- importance.plot %>% 
+  slice(1:10) %>%
+  ggplot() + 
   geom_col(
-    aes(
-      x = fullname, y = MeanDecreaseAccuracy, 
-      fill = factor(dim, levels = c('H','E','V'))), 
-    width = 0.5, show.legend = FALSE) + 
+    aes(y = fullname, x = MeanDecreaseAccuracy, fill = dim),
+    show.legend = FALSE) + 
+  scale_fill_manual(values = colors.hev) + 
+  scale_x_origin('Mean Decrease in Accuracy') + 
+  theme(axis.title.y = element_blank())
+
+g2 <- importance.plot %>% 
+  group_by(dim) %>% 
+  dplyr::summarize(imptce = Sum(MeanDecreaseAccuracy), .groups = 'drop') %>%  
+  mutate(
+    donut = imptce/sum(imptce),
+    start = cumsum(donut),
+    end = c(0, start[-nrow(.)]), 
+    lab = cbind(start,end) %>% apply(1,mean)) %>% 
+  ggplot() + 
+  geom_rect(aes(xmin = 3, xmax = 4, ymin = start, ymax = end, fill = dim)) + 
   scale_fill_manual(
     'Dimension',
-    labels = c('Hazard', 'Exposure', 'Vulnerability'),
-    values = c(
-      rgb(242,168,168, maxColorValue = 255), 
-      rgb(164,24,24, maxColorValue = 255),
-      rgb(75,13,13, maxColorValue = 255))) +
-  scale_y_continuous(
-    name = 'Relative Importance \n(Mean Decrease in Accuracy)', 
-    expand = c(0,0)) + 
-  coord_flip() + 
-  theme(
-    axis.title.y = element_blank(),
-    panel.border = element_blank(), panel.grid.major.y = element_blank())
-
-## HEV donut chart ####
-temp <- importance.plot %>% 
-  group_by(dim) %>% 
-  summarize(decrease_accuracy = Sum(MeanDecreaseAccuracy), .groups = 'drop')
-donut <- (c(temp$decrease_accuracy)/sum(temp$decrease_accuracy)) %>% setNames(temp$dim)
-
-g2 <- ggplot() + 
-  geom_rect(aes(
-    xmin = 3, xmax = 4, ymin = 0, ymax = donut['H'], fill = 'Hazard')) +
-  geom_rect(aes(
-    xmin = 3, xmax = 4, ymin = donut['H'], 
-    ymax = donut['H']+donut['V'], fill = 'Vulnerability')) +
-  geom_rect(aes(
-    xmin = 3, xmax = 4, ymin = donut['H']+donut['V'], 
-    ymax = donut['H']+donut['V']+donut['E'], fill = 'Exposure')) +
-  geom_rect(aes(
-    xmin = 3, xmax = 4, ymin = donut['H']+donut['V']+donut['E'], ymax = 1), fill = 'grey90') +
-  scale_fill_manual(
-    values = c(
-      rgb(214,32,32, maxColorValue = 255),
-      rgb(240,154,154, maxColorValue = 255), 
-      rgb(75,13,13, maxColorValue = 255)),
+    breaks = c('H','E','V'),
+    labels = c('Hazard','Exposure','Vulnerability'),
+    values = colors.hev,
     guide = guide_legend(nrow = 3)) +
   geom_text(
-    aes(
-      x = 3.5, y = c(donut['H']/2, donut['H'] + donut['V']/2, donut['H'] + donut['V'] + donut['E']/2),
-      label = paste0(round(c(donut['H'],donut['V'],donut['E'])*100, 1), '%')),
-    color = 'white', size = 12/.pt, family = 'Segoe UI', fontface = 'bold') + 
+    aes(x = 3.5, y = lab, label = percent(donut), color = dim),
+    size = 10/.pt, family = 'Segoe UI', fontface = 'bold',
+    show.legend = FALSE) + 
+  scale_color_manual(values = c('black','black','white')) + 
   coord_polar("y", start = pi) + 
   xlim(c(2.5,4)) + 
   theme_void() + 
   theme(
     text = element_text(family = 'Segoe UI'), 
-    legend.position = 'bottom', 
+    legend.position = 'top', 
     legend.title = element_blank())
 
-g1 + g2
-ggsave('fig3.jpg', width = 8, height = 5)
+```
+
+```{r fig.width=6, fig.height=3}
+g1 + g2 + guide_area() + 
+  plot_layout(
+    design = 'ac\nab', 
+    heights = c(1,2), widths = c(1,1),
+    guides = 'collect')
 
 ```
 
-## partial dependence plots
+## permutated log loss
 
 ```{r}
-boot <- 100
-pb <- txtProgressBar(min = 0, max = boot, style = 3)
-partials.boot <- 
-  foreach (
-    b = 1:boot,
-    .packages = c('randomForest', 'pdp', 'BAMMtools', 'tidyverse'),
-    .options.snow = opts) %dopar% {
-      partials <- list()
-      breaks <- df.pca %>% 
-        slice(sample(1:nrow(.), 1e4)) %>% 
-        pull(get(vars[i])) %>% 
-        getJenksBreaks(k = 20)
-      foreach (i = 1:20) %do% {
-        partial(
-          f.rf$finalModel, 
-          train = df.pca %>% slice(sample(1:nrow(.), nrow(.), replace = TRUE)), 
-          pred.var = vars[i],
-          pred.grid = data.frame(breaks) %>% setNames(vars[i]),
-          which.class = 'yes',
-          prob = FALSE, progress = FALSE, parallel = FALSE)
-      }
-    }
-save(partials, file = '_results/county_partials_0425.Rdata')
+logloss.plot <- iml.importance$results %>% 
+  as.data.frame %>% 
+  filter(feature != 'y') %>% 
+  left_join(dimension, by = c('feature' = 'var')) %>% 
+  arrange(importance) %>% 
+  mutate(
+    feature = factor(feature, levels = feature),
+    fullname = factor(fullname, levels = fullname)) 
+
+g1 <- logloss.plot %>% 
+  filter(!is.infinite(importance)) %>%
+  arrange(desc(importance)) %>% slice(1:10) %>%
+  ggplot() + 
+  geom_col(
+    aes(y = fullname, x = importance, fill = dim),
+    show.legend = FALSE) + 
+  scale_fill_manual(
+    'Dimension',
+    breaks = c('H','E','V'),
+    labels = c('Hazard','Exposure','Vulnerability'),
+    values = colors.hev) +
+  scale_x_origin('Log-Loss Permutated Feature Importance') + 
+  theme(axis.title.y = element_blank())
+  
+g2 <- logloss.plot %>% 
+  filter(!is.infinite(importance)) %>%
+  group_by(dim = factor(dim, levels = c('H','E','V'))) %>% 
+  dplyr::summarize(imptce = Sum(importance), .groups = 'drop') %>%  
+  mutate(
+    donut = imptce/sum(imptce),
+    start = cumsum(donut),
+    end = c(0, start[-nrow(.)]), 
+    lab = cbind(start,end) %>% apply(1,mean)) %>% 
+  ggplot() + 
+  geom_rect(aes(xmin = 3, xmax = 4, ymin = start, ymax = end, fill = dim)) + 
+  scale_fill_manual(
+    'Dimension',
+    breaks = c('H','E','V'),
+    labels = c('Hazard','Exposure','Vulnerability'),
+    values = colors.hev,
+    guide = guide_legend(nrow = 3)) +
+  geom_text(
+    aes(x = 3.5, y = lab, label = percent(donut), color = dim),
+    size = 10/.pt, family = 'Segoe UI', fontface = 'bold',
+    show.legend = FALSE) + 
+  scale_color_manual(values = c('black','black','white')) + 
+  coord_polar("y", start = pi) + 
+  xlim(c(2.5,4)) + 
+  theme_void() + 
+  theme(
+    text = element_text(family = 'Segoe UI'), 
+    legend.position = 'top', 
+    legend.title = element_blank())
 
 ```
 
+```{r fig.width=6, fig.height=3}
+g1 + g2 + guide_area() + 
+  plot_layout(
+    design = 'ac\nab', 
+    heights = c(1,2), widths = c(1,1),
+    guides = 'collect')
+
+```
+
+## SHAP 
+
 ```{r}
+shap.plot <- shap %>% 
+  as.data.frame %>% select(-y) %>% 
+  summarize(across(everything(), ~mean(abs(.)))) %>% 
+  pivot_longer(everything(), names_to = 'varnames', values_to = 'shap') %>% 
+  left_join(importance.plot %>% select(varnames, fullname, dim), by = 'varnames') %>% 
+  arrange(shap) %>% 
+  mutate(
+    varnames = factor(varnames, levels = varnames),
+    fullname = factor(fullname, levels = fullname),
+    dim = factor(dim, levels = c('H','E','V')))
+  
+g1 <- shap.plot %>% 
+  arrange(desc(shap)) %>% slice(1:10) %>% 
+  ggplot() + 
+  geom_col(
+    aes(y = fullname, x = shap, fill = dim),
+    show.legend = FALSE) + 
+  scale_fill_manual(
+    'Dimension',
+    breaks = c('H','E','V'),
+    labels = c('Hazard','Exposure','Vulnerability'),
+    values = colors.hev) +
+  scale_x_origin('SHAP Feature Importance') + 
+  theme(axis.title.y = element_blank())
+
+g2 <- shap.plot %>% 
+  group_by(dim) %>% 
+  dplyr::summarize(imptce = Sum(shap), .groups = 'drop') %>%  
+  mutate(
+    donut = imptce/sum(imptce),
+    start = cumsum(donut),
+    end = c(0, start[-nrow(.)]), 
+    lab = cbind(start,end) %>% apply(1,mean)) %>% 
+  ggplot() + 
+  geom_rect(aes(xmin = 3, xmax = 4, ymin = start, ymax = end, fill = dim)) + 
+  scale_fill_manual(
+    'Dimension',
+    breaks = c('H','E','V'),
+    labels = c('Hazard','Exposure','Vulnerability'),
+    values = colors.hev,
+    guide = guide_legend(nrow = 3)) +
+  geom_text(
+    aes(x = 3.5, y = lab, label = percent(donut), color = dim),
+    size = 10/.pt, family = 'Segoe UI', fontface = 'bold',
+    show.legend = FALSE) + 
+  scale_color_manual(values = c('black','black','white')) + 
+  coord_polar("y", start = pi) + 
+  xlim(c(2.5,4)) + 
+  theme_void() + 
+  theme(
+    text = element_text(family = 'Segoe UI'), 
+    legend.position = 'top', 
+    legend.title = element_blank())
+
+```
+
+```{r fig.width=6, fig.height=3}
+g1 + g2 + guide_area() + 
+  plot_layout(
+    design = 'ac\nab', 
+    heights = c(1,2), widths = c(1,1),
+    guides = 'collect')
+
+```
+
+# variable impact
+
+## PDP + ICE
+
+```{r}
+transfm <- function(df, xname) df %>% 
+  mutate(x = if(grepl('log', xname)) 10^get(xname)-1 else get(xname))
+
 g <- list()
-for (i in 1:10) {
-  line.color <- ggcolor(3)[as.numeric(factor(dimension[dimension$var == vars[i], 'dim'], levels = c('H','E','V')))]
-  g[[i]] <- ggplot() +
+for (i in 1:6) {
+  xname <- importance.plot$varnames[i]
+  g[[i]] <- partials.ice[[i]] %>% 
+    left_join(obs.id %>% cbind(y = df.pca$y), by = c('yhat.id' = 'i')) %>% 
+    filter(yhat.id %in% samp) %>% 
+    group_by(yhat.id) %>% mutate(c.ice = yhat-yhat[1]) %>% ungroup %>% 
+    transfm(., xname) %>% 
+    ggplot() + 
     geom_line(
-      data = data.frame(partials[[i]]) %>% setNames(c('x','y')), 
-      aes(x = x, y = y), color = line.color, size = 1) + 
-    geom_rug(
-      data = data.frame(data = sample(unlist(df.pca[,vars[i]]), size = 1000)),
-      aes(x = data), size = 0.25) +
-    labs(x = vars[i]) +
-    scale_x_continuous(expand = c(0,0)) + 
-    scale_y_continuous(expand = c(0.1,0.1)) +
-    theme(
-      plot.margin = ggplot2::margin(1, 10, 1, 10),
-      axis.title.y = element_blank(),
-      axis.line = element_line(color = 'grey50'),
-      axis.ticks = element_line(color = 'grey50'))
+      aes(x = x, y = c.ice, group = yhat.id, color = y),
+      size = 0.01, alpha = 0.25, #color = 'grey50', 
+      stat = 'smooth', method = 'loess', span = 0.5, show.legend = FALSE) + 
+    geom_line(
+      data = transfm(partials[[i]], xname),
+      aes(x = x, y = yhat-yhat[1]), size = 1) + 
+    geom_rug(data = transfm(df.pca, xname) %>% slice(samp), aes(x = x)) + 
+    labs(x = xname)
 }
-wrap_plots(g) + plot_layout(nrow = 2)
-ggsave('fig1.png', width = 8, height = 5)
+wrap_plots(g)
 
 ```
 
-## variable importance maps
+```{r}
+g <- list()
+for (i in 1:6) {
+  xname <- importance.plot$varnames[i]
+  g[[i]] <- partials.ice[[i]] %>%
+    left_join(obs.id %>% cbind(y = df.pca$y), by = c('yhat.id' = 'i')) %>%
+    filter(yhat.id %in% samp) %>%
+    transfm(., xname) %>% 
+    ggplot() +
+    geom_line(
+      aes(x = x, y = yhat, group = yhat.id, color = y),
+      size = 0.01, alpha = 0.25, #color = 'grey50',
+      stat = 'smooth', method = 'loess', span = 0.5, show.legend = FALSE) +
+    geom_line(
+      data = transfm(partials[[i]], xname),
+      aes(x = x, y = yhat), size = 1) +
+    geom_point(
+      data = transfm(df.pca, xname) %>% slice(samp),
+      aes(x = x, y = predict(f.rf, df.pca %>% slice(samp), type = 'prob')$yes),
+      size = 1, color = 'grey40') +
+    scale_y_origin() + coord_cartesian(ylim = c(0,1)) + 
+    labs(x = xname)
+}
+wrap_plots(g)
+
+```
+
+## ALE + SHAP
 
 ```{r}
-local <- f.rf$finalModel$localImportance %>% t %>% data.frame %>%
-  rownames_to_column('i') %>% 
-  mutate(i = gsub('X', '', i) %>% toNumber) %>% 
-  cbind(id = obs.id$id) %>% 
-  group_by(id) %>% 
-  summarize_all(mean, .groups = 'drop') %>% 
-  left_join(polys %>% st_drop_geometry %>% select(id,name), by = 'id') %>% 
-  right_join(california %>% select(NAME), ., by = c('NAME' = 'name'))
+iml.ale %>% 
+  mutate(.borders = toNumber(.borders)) %>% 
+  mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)) %>% 
+  filter(.feature %in% importance.plot$varnames[1:6]) %>% 
+  left_join(importance.plot, by = c('.feature' = 'varnames')) %>% 
+  mutate(fullname = factor(fullname, levels = importance.plot$fullname[1:6])) %>% 
+  ggplot() + 
+  geom_hline(yintercept = 0, color = 'grey70') + 
+  geom_line(aes(x = x, y = .value, color = dim), size = 1) + 
+  geom_point(aes(x = x, y = .value, color = dim)) + 
+  # geom_rug(data = transfm(df.pca, xname) %>% slice(samp), aes(x = x)) + 
+  facet_wrap(~fullname, scale = 'free_x', labeller = label_wrap) + 
+  scale_color_manual(
+    'Dimension',
+    breaks = c('H','E','V'),
+    labels = c('Hazard','Exposure','Vulnerability'),
+    values = colors.hev,
+    guide = guide_legend(nrow = 3)) +
+  theme(
+    panel.grid.major.y = element_line(), 
+    strip.background = element_rect(fill = 'grey95', color = NA))
 
+```
+
+```{r}
 g <- list()
-for (i in 1:10) {
-  g[[i]] <- ggplot(local %>% rename(fillvar = vars[i])) + 
-    geom_sf(aes(fill = fillvar), size = 0.01, show.legend = FALSE) + 
-    ggtitle(waiver(), subtitle = vars[i]) + 
-    scale_fill_distiller(palette = 'Blues', direction = 1) + 
+for (i in 1:6) {
+  xname <- importance.plot$varnames[i]
+  g[[i]] <- ggplot() +
+    geom_hline(yintercept = 0, color = 'grey50') + 
+    geom_point(
+      data = transfm(df.pca, xname) %>% slice(samp), 
+      aes(
+        x = x, 
+        y = shap %>% as.data.frame %>% slice(samp) %>% pull(xname)), 
+      alpha = 0.25) +
+    geom_line(
+      data = iml.ale %>% 
+        filter(.feature == xname) %>% 
+        mutate(.borders = toNumber(.borders)) %>% 
+        mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+      aes(x = x, y = .value), color = 'red', size = 1) + 
+    theme(panel.grid.major.y = element_line(size = 0.25)) + 
+    labs(x = xname, y = 'Effect (??)')
+}
+wrap_plots(g)
+
+```
+
+# regional importance
+
+```{r}
+all(df.smote$id == toNumber(obs.id$id))
+
+df.smote %>% count(id) %>% mutate(id = toNumber(id)) %>% 
+  left_join(polys, ., by = 'id') %>% ggplot() + geom_sf(aes(fill = n)) + 
+  scale_fill_scico(palette = 'davos', direction = -1)
+
+```
+
+
+## SHAP 
+
+```{r}
+local.shap <- shap %>% 
+  as.data.frame %>% select(-y) %>% 
+  mutate(id = obs.id$id) %>% 
+  group_by(id = toNumber(id)) %>% 
+  summarize(across(everything(), ~mean(abs(.)))) 
+
+# local.shap %>% 
+#   select(id, importance.plot$varnames[1:6]) %>% 
+#   pivot_longer(-id, names_to = 'varnames', values_to = 'shap') %>% 
+#   left_join(importance.plot %>% select(varnames, fullname), by = 'varnames') %>% 
+#   right_join(polys, ., by = 'id') %>% 
+#   mutate(fullname = factor(fullname, levels = importance.plot$fullname[1:6])) %>% 
+#   ggplot() + 
+#   geom_sf(aes(fill = shap), size = 0.01) + 
+#   facet_wrap(~fullname, labeller = label_wrap) + 
+#   scale_fill_scico(palette = 'davos', direction = -1) + 
+#   theme_void() + 
+#   theme(text = element_text(family = 'Segoe UI'))
+  
+g <- list()
+for (i in 1:6) {
+  g[[i]] <- local.shap %>% 
+    select(id, importance.plot$varnames[i]) %>% 
+    pivot_longer(-id, names_to = 'varnames', values_to = 'shap') %>% 
+    left_join(importance.plot %>% select(varnames, fullname), by = 'varnames') %>% 
+    right_join(polys, ., by = 'id') %>% 
+    mutate(fullname = factor(fullname, levels = importance.plot$fullname[1:6])) %>% 
+    ggplot() + 
+    geom_sf(aes(fill = shap), size = 0.01, show.legend = FALSE) + 
+    scale_fill_scico(palette = 'davos', direction = -1) + 
+    ggtitle(waiver(), subtitle = importance.plot$varnames[i]) + 
     theme_void() + 
     theme(text = element_text(family = 'Segoe UI'))
 }
-wrap_plots(g, nrow = 2)
-ggsave('fig2.png', width = 8, height = 5)
+wrap_plots(g)
+
+```
+
+```{r}
+local.shap %>% 
+  summarize(across(-id, ~mean(abs(.)))) %>% 
+  pivot_longer(everything(), names_to = 'varnames', values_to = 'shap') %>% 
+  left_join(importance.plot %>% select(varnames, fullname, dim), by = 'varnames') %>% 
+  arrange(shap) %>% 
+  mutate(
+    varnames = factor(varnames, levels = varnames),
+    fullname = factor(fullname, levels = fullname),
+    dim = factor(dim, levels = c('H','E','V'))) %>%
+  # left_join(shap.plot, by = c('varnames', 'fullname')) %>% 
+  # select(varnames, shap.x, shap.y) %>% 
+  # ggplot() + geom_point(aes(x = shap.x, y = shap.y))
+  arrange(desc(shap)) %>% slice(1:10) %>% 
+  ggplot() + 
+  geom_col(
+    aes(y = fullname, x = shap, fill = dim),
+    show.legend = FALSE) + 
+  scale_fill_manual(
+    'Dimension',
+    breaks = c('H','E','V'),
+    labels = c('Hazard','Exposure','Vulnerability'),
+    values = colors.hev) +
+  scale_x_origin('SHAP Feature Importance') + 
+  theme(axis.title.y = element_blank())
+
+```
+
+```{r}
+all(df.smote$id == obs.id$id)
+all(df.smote$maxivt == df.pca$maxivt)
+all(df.smote$logprecip_total == df.pca$logprecip_total)
+
+shap %>% data.frame %>% filter(obs.id$id==1)
+
+
+```
+
+
+## localImp
+
+```{r}
+localimp <- 
+  f.rf$finalModel$localImportance %>% t %>% 
+  as.data.frame %>% 
+  mutate(id = obs.id$id) %>% 
+  group_by(id) %>% 
+  summarize(across(everything(), ~mean(abs(.))))
+
+# localimp %>% 
+#   select(id, importance.plot$varnames[1:6]) %>% 
+#   pivot_longer(-id, names_to = 'varnames', values_to = 'localimp') %>% 
+#   left_join(importance.plot %>% select(varnames, fullname), by = 'varnames') %>% 
+#   mutate(id = toNumber(id)) %>% 
+#   right_join(polys, ., by = 'id') %>% 
+#   mutate(fullname = factor(fullname, levels = importance.plot$fullname[1:6])) %>% 
+#   ggplot() + 
+#   geom_sf(aes(fill = localimp), size = 0.01) + 
+#   facet_wrap(~fullname, labeller = label_wrap) + 
+#   scale_fill_scico(palette = 'davos', direction = -1) + 
+#   theme_void() + 
+#   theme(text = element_text(family = 'Segoe UI'))
+
+g <- list()
+for (i in 1:6) {
+  g[[i]] <- localimp %>% 
+    select(id, importance.plot$varnames[i]) %>% 
+    pivot_longer(-id, names_to = 'varnames', values_to = 'localimp') %>% 
+    left_join(importance.plot %>% select(varnames, fullname), by = 'varnames') %>% 
+    mutate(id = toNumber(id)) %>% 
+    right_join(polys, ., by = 'id') %>% 
+    mutate(fullname = factor(fullname, levels = importance.plot$fullname[1:6])) %>% 
+    ggplot() + 
+    geom_sf(aes(fill = localimp), size = 0.01, show.legend = FALSE) + 
+    scale_fill_scico(palette = 'davos', direction = -1) + 
+    ggtitle(waiver(), subtitle = importance.plot$varnames[i]) + 
+    theme_void() + 
+    theme(text = element_text(family = 'Segoe UI'))
+}
+wrap_plots(g)
+
+```
+
+## comparison
+
+```{r fig.width=6, fig.height=4}
+g <- list()
+for (i in 1:6) {
+  xname <- importance.plot$varnames[i]
+  df <- data.frame(x = local.shap %>% pull(xname), y = localimp %>% pull(xname))
+  g[[i]] <- ggplot(df) + 
+    geom_point(aes(x=x, y=y)) + 
+    scale_x_origin('SHAP') + scale_y_origin('localImp') + 
+    ggtitle(waiver(), subtitle = str_wrap(importance.plot$fullname[i],20)) + 
+    theme(panel.grid.major = element_line(size = 0.25))
+}
+wrap_plots(g)
 
 ```
 

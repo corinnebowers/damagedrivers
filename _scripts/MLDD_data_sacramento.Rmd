@@ -126,90 +126,90 @@ TS <- df_3hr[[20]]$ts
 grid_sac <- grid_ca %>% crop(polys, snap = 'out') %>% disaggregate(100) %>% rast
 st_grid <- grid_ca %>% rasterToPolygons %>% st_as_sf %>% .[polys,]
 
-# cl <- makeCluster(cores)
-# registerDoSNOW(cl)
-catalogs <- list()
-  # foreach (
-  #   j = 1:nrow(polys),
-  #   .export = c('assign_AR_cat', 'create_catalog'),
-  #   .packages = c('raster', 'sf', 'terra', 'stars', 'tidyverse', 'lubridate'),
-  #   .options.snow = opts) %dopar% {
-  for (j in 1:nrow(polys)) {
-    setTxtProgressBar(pb,j)
-
-      ## get cells associated with each polygon
-      cover.id <- st_grid[polys[j,],] %>% pull(layer)
-      cover.pct <- 1
-      if (length(cover.id) > 1) {
-        cover <- terra::rasterize(vect(polys[j,]), grid_sac)
-        sac.id <- which(c(cover[]) > cover.threshold | c(cover[]/Sum(cover[]) > cover.threshold))
-        cover.id <- sac.id %>% grid_sac[.] %>% unlist %>% unname
-        cover.pct <- (cover[sac.id]/Sum(cover[sac.id])) %>% unlist %>% unname
-        cover.pct <- data.frame(pct = cover.pct) %>%
-          group_by(level = match(cover.id, unique(cover.id))) %>%
-          summarize(pct = sum(pct)) %>% pull(pct)
-        cover.id <- unique(cover.id)
-      }
-
-      ## combine ARs from associated cells
-      ar.pct <-
-        map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ar)) %>%
-        apply(1, function(x) sum(x)/length(x))
-
-      ## create catalog
-      sm.matrix <- as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(sm)))
-      sm.valid <- which(apply(sm.matrix,2,sum.na)==0)
-      timeseries <-
-        data.frame(
-          ts = TS,
-          ar = ar.pct >= ar.threshold,
-          ivt = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ivt))) %*%
-            as.matrix(cover.pct),
-          precip = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(precip))) %*%
-            as.matrix(cover.pct),
-          sm = sm.matrix[,sm.valid] %*% as.matrix(cover.pct[sm.valid]/sum(cover.pct[sm.valid]))) %>%
-        mutate(count = add_counter(ar))
-      catalog <- create_catalog(timeseries, name = 'ar') %>% filter(cat > 0)
-
-      ## add lagged variables
-      catalogs[[j]] <- timeseries %>%
-        mutate(
-          precip_lag03 = lag(precip, 3*8, align = 'right', fun = 'sum'),
-          precip_lag07 = lag(precip, 7*8, align = 'right', fun = 'sum'),
-          precip_lag14 = lag(precip, 14*8, align = 'right', fun = 'sum'),
-          precip_lag30 = lag(precip, 30*8, align = 'right', fun = 'sum'),
-          sm_lag03 = lag(sm, 3*8, align = 'right', fun = 'mean'),
-          sm_lag07 = lag(sm, 7*8, align = 'right', fun = 'mean'),
-          sm_lag14 = lag(sm, 14*8, align = 'right', fun = 'mean'),
-          sm_lag30 = lag(sm, 30*8, align = 'right', fun = 'mean')) %>%
-        filter(ar) %>%
-        group_by(count) %>%
-        summarize(
-          ar.start = ts[1],
-          logprecip_total = log10(sum(precip)+1),
-          logprecip_max = log10(max(precip)/3+1),
-          across(contains('lag'), ~.[1])) %>%
-        mutate(
-          logprecip_lag03 = ifelse(ar.start-days(3) < TS[1], NA, log10(precip_lag03+1)),
-          logprecip_lag07 = ifelse(ar.start-days(7) < TS[1], NA, log10(precip_lag07+1)),
-          logprecip_lag14 = ifelse(ar.start-days(14) < TS[1], NA, log10(precip_lag14+1)),
-          logprecip_lag30 = ifelse(ar.start-days(30) < TS[1], NA, log10(precip_lag30+1)),
-          sm_lag03 = ifelse(ar.start-days(3) < TS[1], NA, sm_lag03),
-          sm_lag07 = ifelse(ar.start-days(7) < TS[1], NA, sm_lag07),
-          sm_lag14 = ifelse(ar.start-days(14) < TS[1], NA, sm_lag14),
-          sm_lag30 = ifelse(ar.start-days(30) < TS[1], NA, sm_lag30)) %>%
-        select(-ar.start, -starts_with('precip')) %>%
-        left_join(catalog, ., by = 'count') %>%
-        mutate(id = j)
-    }
-# stopCluster(cl)
+# # cl <- makeCluster(cores)
+# # registerDoSNOW(cl)
+# # catalogs <- list()
+# # foreach (
+# #   j = 1:nrow(polys),
+# #   .export = c('assign_AR_cat', 'create_catalog'),
+# #   .packages = c('raster', 'sf', 'terra', 'stars', 'tidyverse', 'lubridate'),
+# #   .options.snow = opts) %dopar% {
+#   for (j in 1:nrow(polys)) {
+#     if (progressbar) setTxtProgressBar(pb,j)
+# 
+#       ## get cells associated with each polygon
+#       cover.id <- st_grid[polys[j,],] %>% pull(layer)
+#       cover.pct <- 1
+#       if (length(cover.id) > 1) {
+#         cover <- terra::rasterize(vect(polys[j,]), grid_sac)
+#         sac.id <- which(c(cover[]) > cover.threshold | c(cover[]/Sum(cover[]) > cover.threshold))
+#         cover.id <- sac.id %>% grid_sac[.] %>% unlist %>% unname
+#         cover.pct <- (cover[sac.id]/Sum(cover[sac.id])) %>% unlist %>% unname
+#         cover.pct <- data.frame(pct = cover.pct) %>%
+#           group_by(level = match(cover.id, unique(cover.id))) %>%
+#           summarize(pct = sum(pct)) %>% pull(pct)
+#         cover.id <- unique(cover.id)
+#       }
+# 
+#       ## combine ARs from associated cells
+#       ar.pct <-
+#         map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ar)) %>%
+#         apply(1, function(x) sum(x)/length(x))
+# 
+#       ## create catalog
+#       sm.matrix <- as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(sm)))
+#       sm.valid <- which(apply(sm.matrix,2,sum.na)==0)
+#       timeseries <-
+#         data.frame(
+#           ts = TS,
+#           ar = ar.pct >= ar.threshold,
+#           ivt = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ivt))) %*%
+#             as.matrix(cover.pct),
+#           precip = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(precip))) %*%
+#             as.matrix(cover.pct),
+#           sm = sm.matrix[,sm.valid] %*% as.matrix(cover.pct[sm.valid]/sum(cover.pct[sm.valid]))) %>%
+#         mutate(count = add_counter(ar))
+#       catalog <- create_catalog(timeseries, name = 'ar') %>% filter(cat > 0)
+# 
+#       ## add lagged variables
+#       catalogs[[j]] <- timeseries %>%
+#         mutate(
+#           precip_lag03 = lag(precip, 3*8, align = 'right', fun = 'sum'),
+#           precip_lag07 = lag(precip, 7*8, align = 'right', fun = 'sum'),
+#           precip_lag14 = lag(precip, 14*8, align = 'right', fun = 'sum'),
+#           precip_lag30 = lag(precip, 30*8, align = 'right', fun = 'sum'),
+#           sm_lag03 = lag(sm, 3*8, align = 'right', fun = 'mean'),
+#           sm_lag07 = lag(sm, 7*8, align = 'right', fun = 'mean'),
+#           sm_lag14 = lag(sm, 14*8, align = 'right', fun = 'mean'),
+#           sm_lag30 = lag(sm, 30*8, align = 'right', fun = 'mean')) %>%
+#         filter(ar) %>%
+#         group_by(count) %>%
+#         summarize(
+#           ar.start = ts[1],
+#           logprecip_total = log10(sum(precip)+1),
+#           logprecip_max = log10(max(precip)/3+1),
+#           across(contains('lag'), ~.[1])) %>%
+#         mutate(
+#           logprecip_lag03 = ifelse(ar.start-days(3) < TS[1], NA, log10(precip_lag03+1)),
+#           logprecip_lag07 = ifelse(ar.start-days(7) < TS[1], NA, log10(precip_lag07+1)),
+#           logprecip_lag14 = ifelse(ar.start-days(14) < TS[1], NA, log10(precip_lag14+1)),
+#           logprecip_lag30 = ifelse(ar.start-days(30) < TS[1], NA, log10(precip_lag30+1)),
+#           sm_lag03 = ifelse(ar.start-days(3) < TS[1], NA, sm_lag03),
+#           sm_lag07 = ifelse(ar.start-days(7) < TS[1], NA, sm_lag07),
+#           sm_lag14 = ifelse(ar.start-days(14) < TS[1], NA, sm_lag14),
+#           sm_lag30 = ifelse(ar.start-days(30) < TS[1], NA, sm_lag30)) %>%
+#         select(-ar.start, -starts_with('precip')) %>%
+#         left_join(catalog, ., by = 'count') %>%
+#         mutate(id = j)
+#     }
+# # stopCluster(cl)
 
 ```
 
 ```{r}
 ## checkpoint
-# save(catalogs, file = '_data/_checkpoints/sac_base_0420.Rdata')
-load('_data/_checkpoints/sac_base_0420.Rdata')
+# save(catalogs, file = '_data/_checkpoints/sac_base_0426.Rdata')
+load('_data/_checkpoints/sac_base_0426.Rdata')
 
 ```
 
@@ -324,7 +324,7 @@ catalogs <-
     if (progressbar) setTxtProgressBar(pb,j)
     catalogs[[j]] %>% 
       mutate(
-        imperv = interp1(
+        pct_imperv = interp1(
           x = c(1980,2001,2004,2006,2008,2011,2013,2016,2019,2022),
           y = c(pct2001[j], pct2001[j], pct2004[j], pct2006[j], pct2008[j], pct2011[j], 
                 pct2013[j], pct2016[j], pct2019[j], pct2019[j]),
@@ -424,12 +424,12 @@ catalogs <-
     if (progressbar) setTxtProgressBar(pb,j)
     catalogs[[j]] %>% 
       mutate(
-        developed = interp1(
+        pct_developed = 100*interp1(
           x = c(1980,2001,2004,2006,2008,2011,2013,2016,2019,2022),
           y = c(dvp2001[j], dvp2001[j], dvp2004[j], dvp2006[j], dvp2008[j], dvp2011[j], 
                 dvp2013[j], dvp2016[j], dvp2019[j], dvp2019[j]),
           xi = year(start)),
-        wetlands = interp1(
+        pct_wetlands = 100*interp1(
           x = c(1980,2001,2004,2006,2008,2011,2013,2016,2019,2022),
           y = c(wet2001[j], wet2001[j], wet2004[j], wet2006[j], wet2008[j], wet2011[j], 
                 wet2013[j], wet2016[j], wet2019[j], wet2019[j]),

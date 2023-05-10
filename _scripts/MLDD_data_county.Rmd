@@ -1,53 +1,65 @@
 ---
-title: "Untitled"
-output: html_document
-date: "2023-04-05"
+title: "Data Collection and Cleaning: Statewide Model"
+date: "2023-05-09"
+author: Corinne Bowers
+output:
+  html_document:
+    toc: true 
+    toc_float: true
+    #toc_depth: 3  
+    code_folding: show
+    # number_sections: false 
+    theme: spacelab   #https://www.datadreaming.org/post/r-markdown-theme-gallery/
+    highlight: tango  #https://www.garrickadenbuie.com/blog/pandoc-syntax-highlighting-examples/
 ---
+
+This script details the collection and assembly of panel data at the county-event level for AR-driven flooding in California.
+For each data type, the original source of the data is provided, and the steps to aggregate and clean the data are explained.
 
 ```{r setup, include = FALSE}
 knitr::opts_knit$set(root.dir = 'D:/6-MLDD/')
-# knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
 knitr::opts_chunk$set(results = 'hold', fig.show = 'hold', fig.align = 'center')
-# rm(list=ls())
 
 ```
 
-# setup
+# Setup
 
-## load packages & functions 
+## Load packages & functions 
 
 ```{r}
 source('_data/setup.R')
 source('_data/create_df_functions.R')
 
-require(censusapi)
-Sys.setenv(CENSUS_KEY = 'f2e090156b02ced027d4ed756f82c9a3a1aa38c9') #censusapi
- 
-require(elevatr) #elevation
 require(readxl) #CRS
 
 ```
 
-## define user polygons
+## Define user polygons
+
+The dataframe $polys$ defines the spatial unit of analysis, which in this case is counties in California.
 
 ```{r}
+## define counties as polygons of interest 
 polys <- california %>% 
   arrange(NAME) %>%  
   transmute(id = 1:nrow(.), name = NAME, geometry) 
 
-## attach area
+## calculate polygon area
 polys <- polys %>% 
   st_transform(projected) %>%  
   mutate(area = toNumber(st_area(.))) %>% 
   st_transform(st_crs(polys))
 
+## turn progress bars on/off
 progressbar <- FALSE
 if (progressbar) pb <- txtProgressBar(min = 0, max = nrow(polys), style = 3)
 opts <- if (progressbar) list(progress = function(x) setTxtProgressBar(pb,x)) else NULL
 
 ```
 
-## calculate inflation 
+## Calculate inflation 
+
+Inflation is calculated based on historical data from the Bureau of Labor Statistics to appropriately compare losses over time.
 
 ```{r}
 bls <- 
@@ -64,20 +76,27 @@ inflation.df <- data.frame(year = 1980:2022) %>%
 
 ```
 
-# load hazard data
+# Hazard variables
 
 ## AR characteristics
 
-AR characteristics and lagged hydrologic variables from antecedent conditions are calculated together. 
-This section calculates the following variables:
+AR characteristics and lagged hydrologic features from antecedent conditions were calculated at the same time for each county, resulting in the following variables:
 
-* AR category 
-* AR maximum IVT (kg/m/s)
-* AR duration (hr)
-* AR storm-total precipitation (mm)
-* AR max 3-hour precipitation (mm/hr)
-* precipitation lags at 3, 7, 14, and 30 days before the AR event (mm)
-* and soil moisture lags at 3, 7, 14, and 30 days (mm/m)
+* AR category,
+* AR maximum IVT (kg/m/s),
+* AR duration (hr),
+* AR storm-total precipitation (mm),
+* AR max 3-hour precipitation (mm/hr),
+* Lagged precipitation totals at 3, 7, 14, and 30 days before the AR event (mm), and 
+* Lagged soil moisture averages at 3, 7, 14, and 30 days before the AR event (mm/m).
+
+The data for all AR characteristics and lagged hydrologic features are available starting in 1980 and vary at the daily temporal scale.
+They vary spatially at the resolution of the MERRA-2 grid (IVT, precipitation), which is approximately 50km x 50km, or finer (soil moisture). 
+
+While some 
+
+*********** need to explain how I aggregated the MERRA-2 grid to the county scale
+
 
 ```{r}
 ## load AR information by grid cell
@@ -97,88 +116,91 @@ cover.threshold <- 0.1
 ## create AR catalogs by polygon
 TS <- df_3hr[[20]]$ts
 
-cl <- makeCluster(cores)
-registerDoSNOW(cl)
-catalogs <-
-  foreach (
-    j = 1:nrow(polys),
-    .export = c('assign_AR_cat', 'create_catalog'),
-    .packages = c('raster', 'sf', 'terra', 'stars', 'tidyverse', 'lubridate'),
-    .options.snow = opts) %dopar% {
-
-      ## get cells associated with each polygon
-      cover <- terra::rasterize(vect(polys[j,]), rast(grid_ca), cover = TRUE)
-      cover.id <-
-        which(c(cover[]) > cover.threshold | c(cover[]/Sum(cover[]) > cover.threshold)) %>%
-        intersect(index_ca)
-      cover.pct <- (cover[cover.id]/sum(cover[cover.id])) %>% unlist %>% unname
-
-      ## combine ARs from associated cells
-      ar.pct <-
-        map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ar)) %>%
-        apply(1, function(x) sum(x)/length(x))
-
-      ## create catalog
-      sm.matrix <- as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(sm)))
-      sm.valid <- which(apply(sm.matrix,2,sum.na)==0)
-      timeseries <-
-        data.frame(
-          ts = TS,
-          ar = ar.pct >= ar.threshold,
-          ivt = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ivt))) %*%
-            as.matrix(cover.pct),
-          precip = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(precip))) %*%
-            as.matrix(cover.pct),
-          sm = sm.matrix[,sm.valid] %*% as.matrix(cover.pct[sm.valid]/sum(cover.pct[sm.valid]))) %>%
-        mutate(count = add_counter(ar))
-      catalog <- create_catalog(timeseries, name = 'ar') %>% filter(cat > 0)
-
-      df_3hr[[353]] %>% pull(sm)
-
-      ## add lagged variables
-      timeseries %>%
-        mutate(
-          precip_lag03 = lag(precip, 3*8, align = 'right', fun = 'sum'),
-          precip_lag07 = lag(precip, 7*8, align = 'right', fun = 'sum'),
-          precip_lag14 = lag(precip, 14*8, align = 'right', fun = 'sum'),
-          precip_lag30 = lag(precip, 30*8, align = 'right', fun = 'sum'),
-          sm_lag03 = lag(sm, 3*8, align = 'right', fun = 'mean'),
-          sm_lag07 = lag(sm, 7*8, align = 'right', fun = 'mean'),
-          sm_lag14 = lag(sm, 14*8, align = 'right', fun = 'mean'),
-          sm_lag30 = lag(sm, 30*8, align = 'right', fun = 'mean')) %>%
-        filter(ar) %>%
-        group_by(count) %>%
-        summarize(
-          ar.start = ts[1],
-          logprecip_total = log10(sum(precip)+1),
-          logprecip_max = log10(max(precip)/3+1),
-          across(contains('lag'), ~.[1])) %>%
-        mutate(
-          logprecip_lag03 = ifelse(ar.start-days(3) < TS[1], NA, log10(precip_lag03+1)),
-          logprecip_lag07 = ifelse(ar.start-days(7) < TS[1], NA, log10(precip_lag07+1)),
-          logprecip_lag14 = ifelse(ar.start-days(14) < TS[1], NA, log10(precip_lag14+1)),
-          logprecip_lag30 = ifelse(ar.start-days(30) < TS[1], NA, log10(precip_lag30+1)),
-          sm_lag03 = ifelse(ar.start-days(3) < TS[1], NA, sm_lag03),
-          sm_lag07 = ifelse(ar.start-days(7) < TS[1], NA, sm_lag07),
-          sm_lag14 = ifelse(ar.start-days(14) < TS[1], NA, sm_lag14),
-          sm_lag30 = ifelse(ar.start-days(30) < TS[1], NA, sm_lag30),
-          ) %>%
-        select(-ar.start, -starts_with('precip')) %>%
-        left_join(catalog, ., by = 'count') %>%
-        mutate(id = j)
-    }
-stopCluster(cl)
+# cl <- makeCluster(cores)
+# registerDoSNOW(cl)
+# catalogs <-
+#   foreach (
+#     j = 1:nrow(polys),
+#     .export = c('assign_AR_cat', 'create_catalog'),
+#     .packages = c('raster', 'sf', 'terra', 'stars', 'tidyverse', 'lubridate'),
+#     .options.snow = opts) %dopar% {
+# 
+#       ## get cells associated with each polygon
+#       cover <- terra::rasterize(vect(polys[j,]), rast(grid_ca), cover = TRUE)
+#       cover.id <-
+#         which(c(cover[]) > cover.threshold | c(cover[]/Sum(cover[]) > cover.threshold)) %>%
+#         intersect(index_ca)
+#       cover.pct <- (cover[cover.id]/sum(cover[cover.id])) %>% unlist %>% unname
+# 
+#       ## combine ARs from associated cells
+#       ar.pct <-
+#         map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ar)) %>%
+#         apply(1, function(x) sum(x)/length(x))
+# 
+#       ## create catalog
+#       sm.matrix <- as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(sm)))
+#       sm.valid <- which(apply(sm.matrix,2,sum.na)==0)
+#       timeseries <-
+#         data.frame(
+#           ts = TS,
+#           ar = ar.pct >= ar.threshold,
+#           ivt = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ivt))) %*%
+#             as.matrix(cover.pct),
+#           precip = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(precip))) %*%
+#             as.matrix(cover.pct),
+#           sm = sm.matrix[,sm.valid] %*% as.matrix(cover.pct[sm.valid]/sum(cover.pct[sm.valid]))) %>%
+#         mutate(count = add_counter(ar))
+#       catalog <- create_catalog(timeseries, name = 'ar') %>% filter(cat > 0)
+# 
+#       df_3hr[[353]] %>% pull(sm)
+# 
+#       ## add lagged variables
+#       timeseries %>%
+#         mutate(
+#           precip_lag03 = lag(precip, 3*8, align = 'right', fun = 'sum'),
+#           precip_lag07 = lag(precip, 7*8, align = 'right', fun = 'sum'),
+#           precip_lag14 = lag(precip, 14*8, align = 'right', fun = 'sum'),
+#           precip_lag30 = lag(precip, 30*8, align = 'right', fun = 'sum'),
+#           sm_lag03 = lag(sm, 3*8, align = 'right', fun = 'mean'),
+#           sm_lag07 = lag(sm, 7*8, align = 'right', fun = 'mean'),
+#           sm_lag14 = lag(sm, 14*8, align = 'right', fun = 'mean'),
+#           sm_lag30 = lag(sm, 30*8, align = 'right', fun = 'mean')) %>%
+#         filter(ar) %>%
+#         group_by(count) %>%
+#         summarize(
+#           ar.start = ts[1],
+#           logprecip_total = log10(sum(precip)+1),
+#           logprecip_max = log10(max(precip)/3+1),
+#           across(contains('lag'), ~.[1])) %>%
+#         mutate(
+#           logprecip_lag03 = ifelse(ar.start-days(3) < TS[1], NA, log10(precip_lag03+1)),
+#           logprecip_lag07 = ifelse(ar.start-days(7) < TS[1], NA, log10(precip_lag07+1)),
+#           logprecip_lag14 = ifelse(ar.start-days(14) < TS[1], NA, log10(precip_lag14+1)),
+#           logprecip_lag30 = ifelse(ar.start-days(30) < TS[1], NA, log10(precip_lag30+1)),
+#           sm_lag03 = ifelse(ar.start-days(3) < TS[1], NA, sm_lag03),
+#           sm_lag07 = ifelse(ar.start-days(7) < TS[1], NA, sm_lag07),
+#           sm_lag14 = ifelse(ar.start-days(14) < TS[1], NA, sm_lag14),
+#           sm_lag30 = ifelse(ar.start-days(30) < TS[1], NA, sm_lag30),
+#           ) %>%
+#         select(-ar.start, -starts_with('precip')) %>%
+#         left_join(catalog, ., by = 'count') %>%
+#         mutate(id = j)
+#     }
+# stopCluster(cl)
 
 ```
 
 ```{r}
 ## checkpoint
-save(catalogs, file = '_data/_checkpoints/county_base_0426.Rdata')
-# load('_data/_checkpoints/county_base_0426.Rdata')
+# save(catalogs, file = '_data/_checkpoints/county_base_0426.Rdata')
+load('_data/_checkpoints/county_base_0426.Rdata')
 
 ```
 
-## climate modes
+## Climate modes
+
+Climate mode features are drawn from indices calculated by NOAA. 
+They do not vary spatially and vary temporally by month.
 
 ```{r}
 ## PDO
@@ -214,9 +236,20 @@ catalogs <-
 
 ```
 
-## land surface 
+## Land surface variables
 
-### imperviousness
+Imperviousness and land cover features are both based on the National Land Cover Database (NLCD).
+The data is available spatially at a very fine resolution (????), so we aggregate it to a percentage of each county that is covered by either impervious surfaces or specific land classes.
+The developed land classes are 21, 22, 23, and 24.
+The wetlands land classes are 90 and 95. 
+More information about the different land classes can be found here: https://www.mrlc.gov/data/legends/national-land-cover-database-class-legend-and-description.
+
+The NLCD has released eight generations of data: 2001, 2004, 2006, 2008, 2011, 2013, 2016, and 2019. 
+Prior to 2001, we assume that all values are constant at 2001 levels, so there is no temporal variation.
+From 2001 to 2019, temporal variation comes from interpolating values between each data generation.
+All values for 2019 and after are constant at 2019 values. 
+
+### Imperviousness
 
 ```{r}
 # https://doi.org/10.1016/j.rse.2021.112357
@@ -290,7 +323,7 @@ catalogs <-
     if (progressbar) setTxtProgressBar(pb,j)
     catalogs[[j]] %>% 
       mutate(
-        imperv = interp1(
+        pct_imperv = interp1(
           x = c(1980,2001,2004,2006,2008,2011,2013,2016,2019,2022),
           y = c(pct2001[j], pct2001[j], pct2004[j], pct2006[j], pct2008[j], pct2011[j], 
                 pct2013[j], pct2016[j], pct2019[j], pct2019[j]),
@@ -299,7 +332,7 @@ catalogs <-
 
 ```
 
-### land cover
+### Land cover (developed & wetlands)
 
 ```{r}
 ## download LULC maps
@@ -391,12 +424,12 @@ catalogs <-
     if (progressbar) setTxtProgressBar(pb,j)
     catalogs[[j]] %>% 
       mutate(
-        developed = interp1(
+        pct_developed = 100*interp1(
           x = c(1980,2001,2004,2006,2008,2011,2013,2016,2019,2022),
           y = c(dvp2001[j], dvp2001[j], dvp2004[j], dvp2006[j], dvp2008[j], dvp2011[j], 
                 dvp2013[j], dvp2016[j], dvp2019[j], dvp2019[j]),
           xi = year(start)),
-        wetlands = interp1(
+        pct_wetlands = 100*interp1(
           x = c(1980,2001,2004,2006,2008,2011,2013,2016,2019,2022),
           y = c(wet2001[j], wet2001[j], wet2004[j], wet2006[j], wet2008[j], wet2011[j], 
                 wet2013[j], wet2016[j], wet2019[j], wet2019[j]),
@@ -405,7 +438,14 @@ catalogs <-
 
 ```
 
-### percent within floodplain
+## Percent within floodplain
+
+We use the 100-year floodplain as defined by the FEMA National Flood Hazard Layer (NFHL).
+All floodplain codes starting with an "A" or a "V" are considered to fall in the 100-year floodplain.
+Similar to the land cover features, we then calculated the percentage of each county's area that was covered by an 100-year floodplain polygon. 
+
+This feature has no temporal variability because tracking changes to the NFHL over time is incredibly challenging with the data available through the FEMA Map Viewer (?????) and was determined to be outside the scope of this project. 
+Therefore the only variation is county-level.
 
 ```{r}
 # https://catalog.data.gov/dataset/national-flood-hazard-layer-nfhl
@@ -460,51 +500,13 @@ catalogs <-
 
 ```
 
-### elevation & slope
+# Exposure variables 
 
-```{r}
-# choosing a zoom level: https://github.com/tilezen/joerd/blob/master/docs/data-sources.md#what-is-the-ground-resolution
-zlevel <- 
-  c('0' = 110692.6,
-    '1' = 55346.3,
-    '2' = 27673.2,
-    '3' = 13836.6,
-    '4' = 6918.3,
-    '5' = 3459.1,
-    '6' = 1729.6, 
-    '7' = 864.8,
-    '8' = 432.4,
-    '9' = 216.2,
-    '10' = 108.1, 
-    '11' = 54.0,
-    '12' = 27.0,
-    '13' = 13.5,
-    '14' = 6.8,
-    '15' = 3.4)
-zoomlevel <- toNumber(names(which(min(polys$area) > zlevel^2)[1])) + 3
+## Population
 
-## calculate elevation
-elev <- get_elev_raster(polys, z = zoomlevel) %>% rast
-polys.temp <- polys %>% mutate(elev = c(terra::extract(elev, vect(polys), 'mean')[,2]))
-
-## calculate slope
-slope <- terra::terrain(elev, v = 'slope')
-polys.temp <- polys.temp %>% mutate(slope = c(terra::extract(slope, vect(polys), 'mean')[,2]))
-
-```
-
-```{r}
-catalogs <- 
-  foreach (j = 1:nrow(polys)) %do% {
-    if (progressbar) setTxtProgressBar(pb,j)
-    catalogs[[j]] %>% mutate(elev = polys.temp$elev[j], slope = polys.temp$slope[j])
-  }
-
-```
-
-# exposure variables 
-
-## population
+We used population data from the US Census Bureau's Population Estimates Program (PEP).
+PEP estimates of population are available by county and year going back to 1980, so no interpolation or filling in was necessary.
+The plot below shows the change in population by county over time as a visual check.
 
 ```{r}
 # https://www2.census.gov/programs-surveys/popest/tables/1980-1990/counties/totals/
@@ -543,10 +545,12 @@ pop <- rbind(
       gsub('Contra Costa Co', 'Contra Costa', .) %>% str_trim)
 
 ## check
-ggplot(pop) + geom_line(aes(x = year, y = pop, group = county)) + scale_y_log10()
+ggplot(pop) + 
+  geom_line(aes(x = year, y = pop, group = county)) + 
+  scale_y_log10() + annotation_logticks(sides = 'l', size = 0.25, color = 'grey25') + 
+  labs(x = 'Year', y = 'County Population')
 
 ```
-
 
 ```{r}
 pop <- pop %>% left_join(polys %>% st_drop_geometry, by = c('county' = 'name'))
@@ -563,11 +567,18 @@ catalogs <-
       select(-pop)
   }
 
-names(catalogs[[1]])
-
 ```
 
-## housing units
+## Housing units
+
+We also used PEP estimates of the number of housing units.
+PEP estimates of housing units are available by county and year going back to 2000, then by state and year going back to 1980 (excluding 1999).
+We first interpolated the state-level number of housing units in 1999.
+Then we distributed housing units into counties for 1980-1999 based on the distribution of housing units by county in 2000.
+
+The plot below shows the change in housing units by county over time as a visual check.
+Because the relationships between counties are assumed to be fixed until 2000, no lines cross or change in relation to each other until after that. 
+However, inter-county relationships seem mostly stable from 2000 onward, so the pre-2000 assumption is reasonable.
 
 ```{r}
 # https://www2.census.gov/programs-surveys/popest/tables/1990-2000/housing/totals/ (includes 1980-1998)
@@ -642,7 +653,10 @@ catalogs <-
 
 ```
 
-## floodplain exposure
+## Floodplain exposure
+
+To calculate the percentage of population and housing units in the floodplain by county, we assumed that population and housing units were evenly distributed in space at the block group level; i.e., if 40% of a block group was covered by the NFHL 100-year floodplain polygons defined earlier, then 40% of that block group's population and 40% of its housing units were said to fall in the floodplain.
+We used block group-level population and housing estimates from the 2021 vintage of the American Community Survey (ACS) 5-year survey. 
 
 ```{r}
 ## find out the percentage of each block group within the floodplain
@@ -734,11 +748,11 @@ catalogs <-
 ```
 
 
-# vulnerability variables
+# Vulnerability variables
 
-## social vulnerability 
+## Social vulnerability 
 
-### CDC social vulnerability index
+### CDC Social Vulnerability Index
 
 ```{r}
 # https://www.atsdr.cdc.gov/placeandhealth/svi/data_documentation_download.html
@@ -1004,7 +1018,6 @@ med_struct_age <- struct_age[,11:2] %>%
       year.start + (0.5-prop.start)*(year.end-year.start)/(prop.end-prop.start))) %>% 
   mutate(med_struct_age = setNA(med_struct_age, 1939)) %>% 
   dplyr::select(county, med_struct_age) %>% 
-  left_join(polys %>% st_drop_geometry, by = c('county' = 'name')) %>% 
   left_join(california %>% st_drop_geometry %>% select(COUNTYFP, NAME), by = c('county' = 'COUNTYFP')) %>% 
   left_join(polys %>% st_drop_geometry %>% select(name,id), by = c('NAME' = 'name')) %>% 
   arrange(id)
@@ -1188,72 +1201,6 @@ catalogs <-
   }
 
 ```
-
-<!-- ### FEMA hazard mitigation investment -->
-
-```{r include = FALSE, eval = FALSE}
-h <- handle_setopt(new_handle())
-api_call <- paste0(
-  'https://www.fema.gov/api/open/v3/HazardMitigationAssistanceProjects?',
-  '$inlinecount=allpages&', '$top=1&', '$filter=state%20eq%20%27California%27&')
-api <- curl_download(api_call, tempfile(), handle = h)
-n <- fromJSON(api)$metadata$count  #should be around 2,000
-
-## get claims dataset from FEMA API
-pb <- txtProgressBar(min = 0, max = n/1000, style = 3)
-cl <- makeCluster(cores)
-registerDoSNOW(cl)
-hma <-
-  foreach (
-    i = 0:(n/1000),
-    .combine = 'rbind', .packages = c('httr', 'curl', 'jsonlite'),
-    .options.snow = opts) %dopar% {
-      h <- handle_setopt(new_handle())
-      api_call <- paste0(
-        'https://www.fema.gov/api/open/v3/HazardMitigationAssistanceProjects?',
-        '$skip=', i*1000,
-        '&$filter=state%20eq%20%27California%27&')
-      api <- curl_download(api_call, tempfile(), handle = h)
-      fromJSON(api)$HazardMitigationAssistanceProjects
-  }
-stopCluster(cl)
-
-```
-
-```{r include = FALSE, eval = FALSE}
-h <- handle_setopt(new_handle())
-api_call <- paste0(
-  'https://www.fema.gov/api/open/v3/HazardMitigationAssistanceMitigatedProperties?',
-  '$inlinecount=allpages&', '$top=1&', '$filter=state%20eq%20%27California%27&')
-api <- curl_download(api_call, tempfile(), handle = h)
-n <- fromJSON(api)$metadata$count  #should be around 2,000
-
-## get claims dataset from FEMA API
-pb <- txtProgressBar(min = 0, max = n/1000, style = 3)
-cl <- makeCluster(cores)
-registerDoSNOW(cl)
-hmaprop <-
-  foreach (
-    i = 0:(n/1000),
-    .combine = 'rbind', .packages = c('httr', 'curl', 'jsonlite'),
-    .options.snow = opts) %dopar% {
-      h <- handle_setopt(new_handle())
-      api_call <- paste0(
-        'https://www.fema.gov/api/open/v3/HazardMitigationAssistanceMitigatedProperties?',
-        '$skip=', i*1000,
-        '&$filter=state%20eq%20%27California%27&')
-      api <- curl_download(api_call, tempfile(), handle = h)
-      fromJSON(api)$HazardMitigationAssistanceMitigatedProperties
-  }
-stopCluster(cl)
-
-hmaprop %>% pull(propertyAction) %>% table
-hmaprop %>% 
-  filter(propertyAction %in% c('Acquisition of Vacant Land', 'Elevation', 'Floodproofed')) %>% 
-  arrange(programFy)
-
-```
-
 
 ### CRS 
 
@@ -1509,5 +1456,4 @@ catalog.df <-
 save(catalog.df, file = '_data/_checkpoints/county_catalog_0426.Rdata')
 
 ```
-
 
