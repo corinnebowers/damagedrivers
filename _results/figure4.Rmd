@@ -1,0 +1,1243 @@
+---
+title: "Figure 4 Duplicates"
+date: "2023-07-19"
+author: Corinne Bowers
+output:
+  html_document:
+    toc: true 
+    toc_float: true
+    #toc_depth: 3  
+    code_folding: hide
+    number_sections: false 
+    theme: spacelab   #https://www.datadreaming.org/post/r-markdown-theme-gallery/
+    highlight: tango  #https://www.garrickadenbuie.com/blog/pandoc-syntax-highlighting-examples/
+---
+
+```{r setup, include = FALSE}
+knitr::opts_knit$set(root.dir = 'D:/04-MLDD/')
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+knitr::opts_chunk$set(results = 'hold', fig.show = 'hold', fig.align = 'center')
+rm(list=ls())
+
+```
+
+# Setup
+
+## Load packages & functions 
+
+```{r}
+source('_data/setup.R')
+
+suppressPackageStartupMessages({
+  require(randomForest)
+  require(pdp)
+  require(BAMMtools)
+  require(pROC)
+  require(PRROC)
+  require(ggbeeswarm)
+  require(iml)
+  require(ggrepel)
+})
+
+label_wrap <- function(variable, value) {
+  lapply(strwrap(as.character(value), width=25, simplify=FALSE), paste, collapse="\n")
+}
+
+theme_set(theme_classic() + theme(text = element_text(family = 'Segoe UI', size = 9)))
+
+transfm <- function(df, xname) df %>% 
+  mutate(x = if(grepl('log', xname)) 10^get(xname)-1 else get(xname))
+
+# colors.hev <- scico(5, palette = 'lajolla')[2:4]
+colors.hev <- scico(8, palette = 'lapaz')[c(7,5,3)]
+# colors.hev <- c(
+#   rgb(242,168,168, maxColorValue = 255), 
+#   rgb(164,24,24, maxColorValue = 255),
+#   rgb(75,13,13, maxColorValue = 255))
+
+ctycol <- scico(7,palette='roma')[2]
+saccol <- roma.colors[5]
+
+```
+
+## Load Sherlock results
+
+```{r}
+nsamp <- 1000
+
+```
+
+
+### Statewide
+
+```{r}
+## 1981 - all variables
+
+load('_results/county_rfmodel_1981.Rdata')
+f.cty.1981 <- f.rf
+df.pca.cty.1981 <- df.pca
+df.train.cty.1981 <- df.train
+df.test.cty.1981 <- df.test
+obs.cty.1981 <- obs.id
+samp.cty.1981 <- sample(1:nrow(df.pca.cty.1981), nsamp)
+
+load(paste0('_results/county_iml_1981.Rdata'))
+ale.cty.1981 <- iml.ale
+load(paste0('_results/county_shap_1981.Rdata'))
+shap.cty.1981 <- shap
+
+```
+
+```{r}
+## 2009 - all variables
+
+load('_results/county_rfmodel_2009.Rdata')
+f.cty.2009 <- f.rf
+df.pca.cty.2009 <- df.pca
+df.train.cty.2009 <- df.train
+df.test.cty.2009 <- df.test
+obs.cty.2009 <- obs.id
+samp.cty.2009 <- sample(1:nrow(df.pca.cty.2009), nsamp)
+
+load(paste0('_results/county_iml_2009.Rdata'))
+ale.cty.2009 <- iml.ale
+load(paste0('_results/county_shap_2009.Rdata'))
+shap.cty.2009 <- shap
+
+```
+
+### Sacramento
+
+```{r}
+## 1981 - all variables
+
+load('_results/sac_rfmodel_1981.Rdata')
+f.sac.1981 <- f.rf
+df.pca.sac.1981 <- df.pca
+df.train.sac.1981 <- df.train
+df.test.sac.1981 <- df.test
+obs.sac.1981 <- obs.id
+samp.sac.1981 <- sample(1:nrow(df.pca.sac.1981), nsamp)
+
+load(paste0('_results/sac_iml_1981.Rdata'))
+ale.sac.1981 <- iml.ale
+load(paste0('_results/sac_shap_1981.Rdata'))
+shap.sac.1981 <- shap
+
+```
+
+```{r}
+## 2009 - all variables
+
+load('_results/sac_rfmodel_2009.Rdata')
+f.sac.2009 <- f.rf
+df.pca.sac.2009 <- df.pca
+df.train.sac.2009 <- df.train
+df.test.sac.2009 <- df.test
+obs.sac.2009 <- obs.id
+samp.sac.2009 <- sample(1:nrow(df.pca.sac.2009), nsamp)
+
+load(paste0('_results/sac_iml_2009.Rdata'))
+ale.sac.2009 <- iml.ale
+load(paste0('_results/sac_shap_2009.Rdata'))
+shap.sac.2009 <- shap
+
+```
+
+### Remove extraneous variables
+
+```{r}
+rm(f.rf, df.pca, df.train, df.test, obs.id, iml.ale, shap)
+
+```
+
+## Calculate feature importance dataframe
+
+```{r}
+plotimp.cty.1981 <- shap.cty.1981 %>% 
+  as.data.frame %>% select(-y) %>% 
+  summarize(across(everything(), ~mean(abs(.)))) %>% 
+  pivot_longer(everything(), names_to = 'varnames', values_to = 'shap') %>% 
+  left_join(dimension, by = c('varnames' = 'var')) %>% 
+  arrange(shap) %>% 
+  filter(shap >= shap[varnames=='noise']) %>% 
+  mutate(
+    rank = nrow(.):1,
+    varnames = factor(varnames, levels = varnames),
+    fullname = factor(fullname, levels = fullname),
+    shap = c(0, shap[-1]),
+    dim = factor(dim, levels = c('H','E','V')))
+plotimp.cty.2009 <- shap.cty.2009 %>% 
+  as.data.frame %>% select(-y) %>% 
+  summarize(across(everything(), ~mean(abs(.)))) %>% 
+  pivot_longer(everything(), names_to = 'varnames', values_to = 'shap') %>% 
+  left_join(dimension, by = c('varnames' = 'var')) %>% 
+  arrange(shap) %>% 
+  filter(shap >= shap[varnames=='noise']) %>% 
+  mutate(
+    rank = nrow(.):1,
+    varnames = factor(varnames, levels = varnames),
+    fullname = factor(fullname, levels = fullname),
+    shap = c(0, shap[-1]),
+    dim = factor(dim, levels = c('H','E','V')))
+
+plotimp.sac.1981 <- shap.sac.1981 %>% 
+  as.data.frame %>% select(-y) %>% 
+  summarize(across(everything(), ~mean(abs(.)))) %>% 
+  pivot_longer(everything(), names_to = 'varnames', values_to = 'shap') %>% 
+  left_join(dimension, by = c('varnames' = 'var')) %>% 
+  arrange(shap) %>% 
+  filter(shap >= shap[varnames=='noise']) %>% 
+  mutate(
+    rank = nrow(.):1,
+    varnames = factor(varnames, levels = varnames),
+    fullname = factor(fullname, levels = fullname),
+    shap = c(0, shap[-1]),
+    dim = factor(dim, levels = c('H','E','V')))
+plotimp.sac.2009 <- shap.sac.2009 %>% 
+  as.data.frame %>% select(-y) %>% 
+  summarize(across(everything(), ~mean(abs(.)))) %>% 
+  pivot_longer(everything(), names_to = 'varnames', values_to = 'shap') %>% 
+  left_join(dimension, by = c('varnames' = 'var')) %>% 
+  arrange(shap) %>% 
+  filter(shap >= shap[varnames=='noise']) %>% 
+  mutate(
+    rank = nrow(.):1,
+    varnames = factor(varnames, levels = varnames),
+    fullname = factor(fullname, levels = fullname),
+    shap = c(0, shap[-1]),
+    dim = factor(dim, levels = c('H','E','V')))
+
+plotimp.all <- 
+  rbind(
+    plotimp.cty.1981 %>% mutate(spat = 'Statewide', temp = '1981-2021'),
+    plotimp.cty.2009 %>% mutate(spat = 'Statewide', temp = '2009-2021'),
+    plotimp.sac.1981 %>% mutate(spat = 'Sacramento', temp = '1981-2021'),
+    plotimp.sac.2009 %>% mutate(spat = 'Sacramento', temp = '2009-2021')) %>% 
+  filter(varnames != 'noise')
+
+```
+
+# Create figures
+
+## FIG 4 - 1981 statewide
+
+```{r}
+## set plot parameters
+ptsize <- 0.5
+linesize <- 0.75
+ptcol <- 'grey50'
+
+rangehaz <- c(-0.3, 0.25)
+rangeexp <- c(-0.15, 0.1)
+rangevuln <- c(-0.15, 0.1)
+
+gbase <- ggplot() + 
+    geom_hline(yintercept = 0, color = 'grey50', size = 0.25) + 
+  scale_y_continuous(
+    'SHAP Feature Contribution',
+    labels = percent,
+    sec.axis = sec_axis(~., name = 'Accumulated Local Effects', labels = percent)) +
+  theme(
+    text = element_text(size = 9),
+    panel.grid.major.y = element_line(size = 0.25),
+    axis.line.y.right = element_line(),
+    axis.ticks.y.right = element_line(),
+    axis.title.y.left = element_blank(),
+    axis.title.y.right = element_blank(),
+    axis.text.y.left = element_blank(),
+    axis.text.y.right = element_blank())
+
+```
+
+### hazard
+
+```{r}
+plotimp.cty.1981 %>% 
+  filter(dim == 'H') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'logprecip_total'
+g1h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp.cty.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.1981[,xname],0.025) &
+          .borders < quantile(df.pca.cty.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Hazard',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(ylim = rangehaz) +
+  theme(
+    plot.title = element_text(face = 'bold', color = '#dda077'),
+    axis.text.y.left = element_text())
+
+xname <- 'maxivt'
+g2h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp.cty.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.1981[,xname],0.025) &
+          .borders < quantile(df.pca.cty.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  coord_cartesian(xlim = c(250,NA), ylim = rangehaz) + 
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(breaks = 250*(0:10), expand = expansion(mult = c(0,0.05)))
+
+xname <- 'duration'
+g3h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp.cty.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.1981[,xname],0.025) &
+          .borders < quantile(df.pca.cty.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(xlim = c(0,200), ylim = rangehaz) +
+  theme(
+    axis.text.y.right = element_text())
+
+```
+
+### exposure 
+
+```{r}
+plotimp.cty.1981 %>% 
+  filter(dim == 'E') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'loghu'
+g1e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp.cty.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.1981[,xname],0.025) &
+          .borders < quantile(df.pca.cty.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Exposure',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_log10(
+    breaks = 10^(1:10), 
+    labels = c('10','100','1K','10K','100K','1M','10M','100M','1B','10B')) + 
+  annotation_logticks(sides = 'b', size = 0.25, color = 'grey25') + 
+  coord_cartesian(ylim = rangeexp) + 
+  theme(
+    plot.title = element_text(face = 'bold', color = '#71938f'),
+    axis.title.y.left = element_text(),
+    axis.text.y.left = element_text())
+
+xname <- 'pop_pct_floodplain'
+g2e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp.cty.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.1981[,xname],0.025) &
+          .borders < quantile(df.pca.cty.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(xlim = c(0,0.4), ylim = rangeexp)
+
+xname <- 'pct_sfh'
+g3e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp.cty.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.1981[,xname],0.025) &
+          .borders < quantile(df.pca.cty.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 24)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = 0.05)) + 
+  coord_cartesian(xlim = c(0.4,NA), ylim = rangeexp) + 
+  theme(
+    axis.title.y.right = element_text(),
+    axis.text.y.right = element_text())
+
+```
+
+### vulnerability 
+
+```{r}
+plotimp.cty.1981 %>% 
+  filter(dim == 'V') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'CRS'
+g1v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp.cty.1981) %>% pull(xname)),
+    aes(x = jitter(x), y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(.borders > 2) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Vulnerability',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  coord_cartesian(ylim = rangevuln) +
+  scale_x_continuous(breaks = 2:10) + 
+  theme(
+    plot.title = element_text(face = 'bold', color = colors.hev[3]),
+    axis.text.y.left = element_text())
+
+xname <- 'hhincome22'
+g2v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp.cty.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.1981[,xname],0.025) &
+          .borders < quantile(df.pca.cty.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = comma_format(scale = 1e-3, prefix = '$', suffix = 'K')) + 
+  coord_cartesian(ylim = rangevuln)
+
+xname <- 'cal_polburd'
+g3v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp.cty.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.1981[,xname],0.025) &
+          .borders < quantile(df.pca.cty.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  coord_cartesian(ylim = rangevuln) +
+  theme(
+    axis.text.y.right = element_text())
+
+```
+
+```{r fig.width=6, fig.height=6}
+g1h + g2h + g3h + g1e + g2e + g3e + g1v + g2v + g3v + 
+  plot_layout(nrow = 3) +
+  plot_annotation(tag_levels = 'a', tag_prefix = '(', tag_suffix = ')') &
+  theme(
+    legend.position = 'none',
+    plot.tag = element_text(face = 'bold'),
+    plot.tag.position = c(0.12,0.975)) #1.01 without the title
+ggsave('_figures/fig4_impact_county1981.png', width = 6, height = 6)
+
+```
+
+## FIG 4 - 2009 statewide
+
+### hazard
+
+```{r}
+plotimp.cty.2009 %>% 
+  filter(dim == 'H') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'logprecip_total'
+g1h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.2009, xname) %>% slice(samp.cty.2009) %>% 
+      mutate(y = shap.cty.2009 %>% data.frame %>% slice(samp.cty.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.2009[,xname],0.025) &
+          .borders < quantile(df.pca.cty.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Hazard',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(ylim = rangehaz) +
+  theme(
+    plot.title = element_text(face = 'bold', color = '#dda077'),
+    axis.text.y.left = element_text())
+
+xname <- 'maxivt'
+g2h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.2009, xname) %>% slice(samp.cty.2009) %>% 
+      mutate(y = shap.cty.2009 %>% data.frame %>% slice(samp.cty.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.2009[,xname],0.025) &
+          .borders < quantile(df.pca.cty.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  coord_cartesian(xlim = c(250,NA), ylim = rangehaz) + 
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(breaks = 250*(0:10), expand = expansion(mult = c(0,0.05)))
+
+
+xname <- 'logprecip_lag03'
+g3h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.2009, xname) %>% slice(samp.cty.2009) %>% 
+      mutate(y = shap.cty.2009 %>% data.frame %>% slice(samp.cty.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.2009[,xname],0.025) &
+          .borders < quantile(df.pca.cty.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(xlim = c(0,150), ylim = rangehaz) +
+  theme(
+    axis.text.y.right = element_text())
+
+```
+
+### exposure 
+
+```{r}
+plotimp.cty.2009 %>% 
+  filter(dim == 'E') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'loghu'
+g1e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.2009, xname) %>% slice(samp.cty.2009) %>% 
+      mutate(y = shap.cty.2009 %>% data.frame %>% slice(samp.cty.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.2009[,xname],0.025) &
+          .borders < quantile(df.pca.cty.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Exposure',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_log10(
+    breaks = 10^(1:10), 
+    labels = c('10','100','1K','10K','100K','1M','10M','100M','1B','10B')) + 
+  annotation_logticks(sides = 'b', size = 0.25, color = 'grey25') + 
+  coord_cartesian(ylim = rangeexp) + 
+  theme(
+    plot.title = element_text(face = 'bold', color = '#71938f'),
+    axis.title.y.left = element_text(),
+    axis.text.y.left = element_text())
+
+xname <- 'pop_pct_floodplain'
+g2e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.2009, xname) %>% slice(samp.cty.2009) %>% 
+      mutate(y = shap.cty.2009 %>% data.frame %>% slice(samp.cty.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.2009[,xname],0.025) &
+          .borders < quantile(df.pca.cty.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(xlim = c(0,0.4), ylim = rangeexp)
+
+g3e <- ggplot() + 
+  geom_hline(yintercept = 0, color = 'white') + 
+  scale_y_continuous(
+    'SHAP Feature Contribution',
+    labels = percent,
+    sec.axis = sec_axis(~., name = 'Accumulated Local Effects', labels = percent)) +
+  coord_cartesian(xlim = c(0.4,NA), ylim = rangeexp) +
+  theme_classic() +
+  theme(
+    text = element_text(family = 'Segoe UI', size = 9),
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title.y.left = element_blank(),
+    axis.text.y.left = element_blank(),
+    axis.line.y.right = element_line(),
+    axis.ticks.y.right = element_line(),
+    axis.title.y.right = element_text(),
+    axis.text.y.right = element_text())
+
+```
+
+### vulnerability 
+
+```{r}
+plotimp.cty.2009 %>% 
+  filter(dim == 'V') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'cdc_theme2'
+g1v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.2009, xname) %>% slice(samp.cty.2009) %>% 
+      mutate(y = shap.cty.2009 %>% data.frame %>% slice(samp.cty.2009) %>% pull(xname)),
+    aes(x = jitter(x), y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Vulnerability',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  coord_cartesian(ylim = rangevuln) +
+  theme(
+    plot.title = element_text(face = 'bold', color = colors.hev[3]),
+    axis.text.y.left = element_text())
+
+xname <- 'cdc_theme4'
+g2v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.2009, xname) %>% slice(samp.cty.2009) %>% 
+      mutate(y = shap.cty.2009 %>% data.frame %>% slice(samp.cty.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.2009[,xname],0.025) &
+          .borders < quantile(df.pca.cty.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  coord_cartesian(ylim = rangevuln)
+
+xname <- 'cal_popchar'
+g3v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.cty.2009, xname) %>% slice(samp.cty.2009) %>% 
+      mutate(y = shap.cty.2009 %>% data.frame %>% slice(samp.cty.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.cty.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.cty.2009[,xname],0.025) &
+          .borders < quantile(df.pca.cty.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  coord_cartesian(ylim = rangevuln) +
+  theme(
+    axis.text.y.right = element_text())
+
+```
+
+```{r fig.width=6, fig.height=6}
+g1h + g2h + g3h + g1e + g2e + g3e + g1v + g2v + g3v + 
+  plot_layout(nrow = 3) +
+  plot_annotation(tag_levels = 'a', tag_prefix = '(', tag_suffix = ')') &
+  theme(
+    legend.position = 'none',
+    plot.tag = element_text(face = 'bold'),
+    plot.tag.position = c(0.12,0.975)) #1.01 without the title
+ggsave('_figures/fig4_impact_county2009.png', width = 6, height = 6)
+
+```
+
+## FIG 4 - 1981 Sacramento
+
+### hazard
+
+```{r}
+plotimp.sac.1981 %>% 
+  filter(dim == 'H') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'logprecip_total'
+g1h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.1981, xname) %>% slice(samp.sac.1981) %>% 
+      mutate(y = shap.sac.1981 %>% data.frame %>% slice(samp.sac.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.1981[,xname],0.025) &
+          .borders < quantile(df.pca.sac.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Hazard',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(ylim = rangehaz) +
+  theme(
+    plot.title = element_text(face = 'bold', color = '#dda077'),
+    axis.text.y.left = element_text())
+
+xname <- 'maxivt'
+g2h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.1981, xname) %>% slice(samp.sac.1981) %>% 
+      mutate(y = shap.sac.1981 %>% data.frame %>% slice(samp.sac.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.1981[,xname],0.025) &
+          .borders < quantile(df.pca.sac.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  coord_cartesian(xlim = c(250,NA), ylim = rangehaz) + 
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(breaks = 250*(0:10), expand = expansion(mult = c(0,0.05)))
+
+
+xname <- 'sm_lag03'
+g3h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.1981, xname) %>% slice(samp.sac.1981) %>% 
+      mutate(y = shap.sac.1981 %>% data.frame %>% slice(samp.sac.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.1981[,xname],0.025) &
+          .borders < quantile(df.pca.sac.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(ylim = rangehaz) +
+  theme(
+    axis.text.y.right = element_text())
+
+```
+
+### exposure 
+
+```{r}
+plotimp.sac.1981 %>% 
+  filter(dim == 'E') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'pop_pct_floodplain'
+g1e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.1981, xname) %>% slice(samp.sac.1981) %>% 
+      mutate(y = shap.sac.1981 %>% data.frame %>% slice(samp.sac.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.1981[,xname],0.025) &
+          .borders < quantile(df.pca.sac.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Exposure',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.02))) + 
+  coord_cartesian(ylim = rangeexp) + 
+  theme(
+    plot.title = element_text(face = 'bold', color = '#71938f'),
+    axis.title.y.left = element_text(),
+    axis.text.y.left = element_text())
+
+xname <- 'loghu'
+g2e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.1981, xname) %>% slice(samp.sac.1981) %>% 
+      mutate(y = shap.sac.1981 %>% data.frame %>% slice(samp.sac.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.1981[,xname],0.025) &
+          .borders < quantile(df.pca.sac.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_log10() +
+  annotation_logticks(sides = 'b', size = 0.25, color = 'grey25') + 
+  coord_cartesian(ylim = rangeexp)
+
+xname <- 'pct_sfh'
+g3e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.1981, xname) %>% slice(samp.sac.1981) %>% 
+      mutate(y = shap.sac.1981 %>% data.frame %>% slice(samp.sac.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.1981[,xname],0.025) &
+          .borders < quantile(df.pca.sac.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.02))) + 
+  coord_cartesian(ylim = rangeexp) + 
+  theme(
+    axis.title.y.right = element_text(),
+    axis.text.y.right = element_text())
+
+```
+
+### vulnerability 
+
+```{r}
+plotimp.sac.1981 %>% 
+  filter(dim == 'V') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'med_struct_age'
+g1v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.1981, xname) %>% slice(samp.sac.1981) %>% 
+      mutate(y = shap.sac.1981 %>% data.frame %>% slice(samp.sac.1981) %>% pull(xname)),
+    aes(x = jitter(x), y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Vulnerability',
+    x = dimension$fullname[dimension$var==xname] %>% paste(.,'(years)') %>% str_wrap(width = 20)) +
+  coord_cartesian(ylim = rangevuln) +
+  theme(
+    plot.title = element_text(face = 'bold', color = colors.hev[3]),
+    axis.text.y.left = element_text())
+
+xname <- 'pct_mobile'
+g2v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.1981, xname) %>% slice(samp.sac.1981) %>% 
+      mutate(y = shap.sac.1981 %>% data.frame %>% slice(samp.sac.1981) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.1981[,xname],0.025) &
+          .borders < quantile(df.pca.sac.1981[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.02))) + 
+  coord_cartesian(xlim = c(0,0.35), ylim = rangevuln)
+
+xname <- 'CRS'
+g3v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.1981, xname) %>% slice(samp.sac.1981) %>% 
+      mutate(y = shap.sac.1981 %>% data.frame %>% slice(samp.sac.1981) %>% pull(xname)),
+    aes(x = jitter(x), y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.1981 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(.borders > 2) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  coord_cartesian(ylim = rangevuln) +
+  scale_x_continuous(breaks = 2:10) +
+  theme(
+    axis.text.y.right = element_text())
+
+```
+
+```{r fig.width=6, fig.height=6}
+g1h + g2h + g3h + g1e + g2e + g3e + g1v + g2v + g3v + 
+  plot_layout(nrow = 3) +
+  plot_annotation(tag_levels = 'a', tag_prefix = '(', tag_suffix = ')') &
+  theme(
+    legend.position = 'none',
+    plot.tag = element_text(face = 'bold'),
+    plot.tag.position = c(0.12,0.975)) #1.01 without the title
+ggsave('_figures/fig4_impact_sac1981.png', width = 6, height = 6)
+
+```
+
+
+## FIG 4 - 2009 Sacramento
+
+### hazard
+
+```{r}
+plotimp.sac.2009 %>% 
+  filter(dim == 'H') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'maxivt'
+g1h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.2009, xname) %>% slice(samp.sac.2009) %>% 
+      mutate(y = shap.sac.2009 %>% data.frame %>% slice(samp.sac.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.2009[,xname],0.025) &
+          .borders < quantile(df.pca.sac.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  coord_cartesian(xlim = c(250,NA), ylim = rangehaz) + 
+  labs(
+    title = 'Hazard',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(breaks = 250*(0:10), expand = expansion(mult = c(0,0.05))) +
+  theme(
+    plot.title = element_text(face = 'bold', color = '#dda077'),
+    axis.text.y.left = element_text())
+
+xname <- 'logprecip_total'
+g2h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.2009, xname) %>% slice(samp.sac.2009) %>% 
+      mutate(y = shap.sac.2009 %>% data.frame %>% slice(samp.sac.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.2009[,xname],0.025) &
+          .borders < quantile(df.pca.sac.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(ylim = rangehaz)
+
+xname <- 'logprecip_lag03'
+g3h <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.2009, xname) %>% slice(samp.sac.2009) %>% 
+      mutate(y = shap.sac.2009 %>% data.frame %>% slice(samp.sac.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.2009[,xname],0.025) &
+          .borders < quantile(df.pca.sac.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(expand = expansion(mult = c(0.02,0.05))) + 
+  coord_cartesian(ylim = rangehaz) +
+  theme(
+    axis.text.y.right = element_text())
+
+```
+
+### exposure 
+
+```{r}
+plotimp.sac.2009 %>% 
+  filter(dim == 'E') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'pop_pct_floodplain'
+g1e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.2009, xname) %>% slice(samp.sac.2009) %>% 
+      mutate(y = shap.sac.2009 %>% data.frame %>% slice(samp.sac.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.2009[,xname],0.025) &
+          .borders < quantile(df.pca.sac.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Exposure',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.02))) + 
+  coord_cartesian(ylim = rangeexp) + 
+  theme(
+    plot.title = element_text(face = 'bold', color = '#71938f'),
+    axis.title.y.left = element_text(),
+    axis.text.y.left = element_text())
+
+xname <- 'loghu'
+g2e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.2009, xname) %>% slice(samp.sac.2009) %>% 
+      mutate(y = shap.sac.2009 %>% data.frame %>% slice(samp.sac.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.2009[,xname],0.025) &
+          .borders < quantile(df.pca.sac.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_log10() +
+  annotation_logticks(sides = 'b', size = 0.25, color = 'grey25') + 
+  coord_cartesian(ylim = rangeexp)
+
+xname <- 'pct_sfh'
+g3e <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.2009, xname) %>% slice(samp.sac.2009) %>% 
+      mutate(y = shap.sac.2009 %>% data.frame %>% slice(samp.sac.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.2009[,xname],0.025) &
+          .borders < quantile(df.pca.sac.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.02))) + 
+  coord_cartesian(ylim = rangeexp) + 
+  theme(
+    axis.title.y.right = element_text(),
+    axis.text.y.right = element_text())
+
+```
+
+### vulnerability 
+
+```{r}
+plotimp.sac.2009 %>% 
+  filter(dim == 'V') %>% arrange(desc(shap)) %>% 
+  head(3) %>% pull(varnames) %>% paste
+
+```
+
+```{r}
+xname <- 'pct_over40'
+g1v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.2009, xname) %>% slice(samp.sac.2009) %>% 
+      mutate(y = shap.sac.2009 %>% data.frame %>% slice(samp.sac.2009) %>% pull(xname)),
+    aes(x = jitter(x), y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    title = 'Vulnerability',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.02))) + 
+  coord_cartesian(ylim = rangevuln) +
+  theme(
+    plot.title = element_text(face = 'bold', color = colors.hev[3]),
+    axis.text.y.left = element_text())
+
+xname <- 'pct_mobile'
+g2v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.2009, xname) %>% slice(samp.sac.2009) %>% 
+      mutate(y = shap.sac.2009 %>% data.frame %>% slice(samp.sac.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.2009[,xname],0.025) &
+          .borders < quantile(df.pca.sac.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.02))) + 
+  coord_cartesian(xlim = c(0,0.35), ylim = rangevuln)
+
+xname <- 'cdc_theme2'
+g3v <- gbase + 
+  geom_point(
+    data = transfm(df.pca.sac.2009, xname) %>% slice(samp.sac.2009) %>% 
+      mutate(y = shap.sac.2009 %>% data.frame %>% slice(samp.sac.2009) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  geom_line(
+    data = ale.sac.2009 %>% 
+      filter(.feature == xname) %>% 
+      mutate(.borders = toNumber(.borders)) %>% 
+      filter(
+        .borders > quantile(df.pca.sac.2009[,xname],0.025) &
+          .borders < quantile(df.pca.sac.2009[,xname],0.975)) %>% 
+      mutate(x = ifelse(grepl('log',.feature), 10^.borders-1, .borders)),
+    aes(x = x, y = .value), size = linesize) +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) +
+  scale_x_continuous(expand = expansion(mult = c(0.02,0.02))) + 
+  coord_cartesian(ylim = rangevuln) +
+  theme(
+    axis.text.y.right = element_text())
+
+```
+
+```{r fig.width=6, fig.height=6}
+g1h + g2h + g3h + g1e + g2e + g3e + g1v + g2v + g3v + 
+  plot_layout(nrow = 3) +
+  plot_annotation(tag_levels = 'a', tag_prefix = '(', tag_suffix = ')') &
+  theme(
+    legend.position = 'none',
+    plot.tag = element_text(face = 'bold'),
+    plot.tag.position = c(0.12,0.975)) #1.01 without the title
+ggsave('_figures/fig4_impact_sac2009.png', width = 6, height = 6)
+
+```
+
+```{r}
+
+```
+

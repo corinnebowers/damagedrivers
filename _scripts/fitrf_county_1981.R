@@ -110,6 +110,12 @@ df$logprecip_lag30[is.na(df$logprecip_lag30)] <-
 f30 <- lm(sm_lag30 ~ logprecip_lag14 + sm_lag14 + logprecip_lag07 + sm_lag07 + sm_lag03, data = df)
 df$sm_lag30[is.na(df$sm_lag30)] <- predict(f30, df %>% filter(is.na(sm_lag30)))
 
+## report results
+cat('  number of records:\n')
+nrow(df)
+table(df$y)
+(table(df$y)/nrow(df)*100) %>% round(2)
+
 
 #### train & test #################################################################################
 cat('splitting training and testing data...\n')
@@ -151,6 +157,7 @@ df.smote <- df.smote %>%
   filter(complete.cases(.))
 obs.id <- data.frame(i = 1:nrow(df.smote), id = NA) #df.smote$id)
 
+## report results
 cat('  number of records:\n')
 nrow(df.smote)
 table(df.smote$y)/nrow(df.smote)

@@ -64,6 +64,12 @@ df <- catalog.df %>%
   mutate(y = factor(ifelse(claims_num > 0, 'yes', 'no'))) %>% 
   select(-count, -start, -end, -claims_num, -claims_value)
 
+## report results
+cat('  number of records:\n')
+nrow(df)
+table(df$y)
+(table(df$y)/nrow(df)*100) %>% round(2)
+
 
 #### train & test #################################################################################
 cat('splitting training and testing data...\n')

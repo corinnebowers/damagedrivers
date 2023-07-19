@@ -91,6 +91,12 @@ df$sm_lag30[is.na(df$sm_lag30)] <- predict(f30, df %>% filter(is.na(sm_lag30)))
 
 # apply(df, 2, sum.na) %>% sum
 
+## report results
+cat('  number of records:\n')
+nrow(df)
+table(df$y)
+(table(df$y)/nrow(df)*100) %>% round(2)
+
 
 #### train & test #################################################################################
 cat('splitting training and testing data...\n')
