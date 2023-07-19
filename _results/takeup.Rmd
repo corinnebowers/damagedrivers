@@ -1,0 +1,261 @@
+---
+title: "Observed vs. Expected NFIP Takeup Behavior"
+date: "2023-07-19"
+author: Corinne Bowers
+output:
+  html_document:
+    toc: true 
+    toc_float: true
+    #toc_depth: 3  
+    code_folding: hide
+    number_sections: false 
+    theme: spacelab   #https://www.datadreaming.org/post/r-markdown-theme-gallery/
+    highlight: tango  #https://www.garrickadenbuie.com/blog/pandoc-syntax-highlighting-examples/
+---
+
+```{r setup, include = FALSE}
+knitr::opts_knit$set(root.dir = 'D:/04-MLDD/')
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+knitr::opts_chunk$set(results = 'hold', fig.show = 'hold', fig.align = 'center')
+rm(list=ls())
+
+```
+
+# Setup
+
+## Load functions & packages 
+
+```{r}
+source('_data/setup.R')
+
+suppressPackageStartupMessages({
+  require(DMwR)
+  require(themis)
+})
+
+```
+
+## Load data
+
+```{r}
+load('_data/_checkpoints/county_catalog_0705.Rdata')
+load('_results/county_rfmodel_1981.Rdata')
+load('_data/_checkpoints/bg_0417.Rdata')
+load('_data/policies_save.Rdata')
+
+polys <- california %>% 
+  arrange(NAME) %>%  
+  transmute(id = 1:nrow(.), name = NAME, geometry) 
+
+```
+
+## Clean up 2021 policies & aggregate by county
+
+```{r}
+policies.poly <- policies %>%
+  transmute(
+    floodZone,
+    county = str_sub(countyCode, start = 3, end = 5),
+    tract = str_sub(censusTract, start = 6),
+    policy_start = ymd_hms(policyEffectiveDate),
+    policy_end = ymd_hms(policyTerminationDate)) %>%
+  filter(complete.cases(.)) %>%
+  filter(ymd('2021-10-01') %within% interval(policy_start, policy_end)) %>%
+  left_join(california %>% st_drop_geometry %>% select(COUNTYFP,NAME), by = c('county' = 'COUNTYFP')) %>%
+  left_join(polys %>% st_drop_geometry %>% select(id,name), by = c('NAME' = 'name')) %>%
+  filter(!is.na(id)) %>% 
+  mutate(NFHL = grepl('A',floodZone) | grepl('V',floodZone))
+
+```
+
+# Census Tract
+
+## Check methodology at the census tract level
+
+```{r}
+## calculate observed 2021 housing units by tract
+hu_bytract <-   
+  bg %>% st_drop_geometry %>% 
+  transmute(county = COUNTYFP, tract = TRACTCE, pctarea = partarea/area, hu) %>% 
+  mutate(hu_in = hu*pctarea, hu_out = hu*(1-pctarea)) %>% 
+  group_by(county, tract) %>% 
+  summarize(
+    hu = Sum(hu), hu_in = round(sum(hu_in)), hu_out = round(sum(hu_out)), 
+    .groups = 'drop')
+
+## calculate observed 2021 policies by tract
+policies_bytract <- policies.poly %>%
+  count(county, tract, NFHL) %>% 
+  mutate(temp = case_when(NFHL ~ 'policies_in', TRUE ~ 'policies_out')) %>% 
+  select(-NFHL) %>% 
+  pivot_wider(id_cols = c(county,tract), names_from = temp, values_from = n) %>% 
+  mutate(across(starts_with('policies'), ~setNA(.,0)))
+
+## calculate statewide observed NFIP takeup rates within & outside of the FEMA 100-year floodplain
+takeup_in <- Sum(policies_bytract$policies_in) / Sum(hu_bytract$hu_in)
+takeup_out <- Sum(policies_bytract$policies_out) / Sum(hu_bytract$hu_out)
+
+```
+
+```{r}
+## gut check: make sure we can reverse-engineer the correct number of observed policies
+
+## total number of policies
+bg %>% st_drop_geometry %>% 
+  transmute(county = COUNTYFP, tract = TRACTCE, pctarea = partarea/area, hu) %>% 
+  mutate(
+    hu_in = hu*pctarea, hu_out = hu*(1-pctarea),
+    exp_in = takeup_in*hu_in, exp_out = takeup_out*hu_out) %>% 
+  summarize(exp_in = sum(exp_in), exp_out = sum(exp_out)) %>% sum
+Sum(policies_bytract$policies_in) + Sum(policies_bytract$policies_out)
+
+## policies in & outside of the floodplain
+takeup_bytract <- bg %>% st_drop_geometry %>%
+  transmute(county = COUNTYFP, tract = TRACTCE, pctarea = partarea/area, hu) %>% 
+  mutate(
+    hu_in = hu*pctarea, hu_out = hu*(1-pctarea),
+    exp_in = takeup_in*hu_in, exp_out = takeup_out*hu_out) %>% 
+  group_by(county, tract) %>% 
+  summarize(
+    hu = Sum(hu), hu_in = round(sum(hu_in)), hu_out = hu-hu_in,
+    exp_in = round(sum(exp_in)), exp_out = round(sum(exp_out)), .groups = 'drop') %>% 
+  full_join(policies_bytract, by = c('county', 'tract')) %>% 
+  mutate(across(c(ends_with('in'), ends_with('out')), ~setNA(.,0))) 
+takeup_bytract %>% summarize(across(c(ends_with('in'), ends_with('out')), Sum))
+
+## within <1% for both checks -> move on
+
+```
+
+# County 
+
+## Repeat calculations at the county level
+
+```{r}
+## calculate observed 2021 housing units by county
+hu_bycounty <- 
+  bg %>% st_drop_geometry %>% 
+  transmute(county = COUNTYFP, pctarea = partarea/area, hu) %>% 
+  mutate(hu_in = hu*pctarea, hu_out = hu*(1-pctarea)) %>% 
+  group_by(county) %>% 
+  summarize(
+    hu = Sum(hu), hu_in = round(sum(hu_in)), hu_out = round(sum(hu_out)), 
+    .groups = 'drop')
+
+## calculate observed 2021 policies by tract
+policies_bycounty <- 
+  policies.poly %>%
+  count(county, NFHL) %>% 
+  mutate(temp = case_when(NFHL ~ 'policies_in', TRUE ~ 'policies_out')) %>% 
+  select(-NFHL) %>% 
+  pivot_wider(id_cols = county, names_from = temp, values_from = n) %>% 
+  mutate(across(starts_with('policies'), ~setNA(.,0)))
+
+## calculate statewide observed NFIP takeup rates within & outside of the FEMA 100-year floodplain
+takeup_in <- Sum(policies_bycounty$policies_in) / Sum(hu_bycounty$hu_in)
+takeup_out <- Sum(policies_bycounty$policies_out) / Sum(hu_bycounty$hu_out)
+
+```
+
+```{r}
+## gut check
+(Sum(policies_bycounty$policies_in)+Sum(policies_bycounty$policies_out)) /
+  (Sum(hu_bycounty$hu_in)+Sum(hu_bycounty$hu_out))
+nrow(policies.poly) / Sum(bg$hu)
+
+```
+
+```{r}
+takeup_bycounty <- 
+  bg %>% st_drop_geometry %>%
+  transmute(county = COUNTYFP, pctarea = partarea/area, hu) %>% 
+  mutate(
+    hu_in = hu*pctarea, hu_out = hu*(1-pctarea),
+    exp_in = takeup_in*hu_in, exp_out = takeup_out*hu_out) %>% 
+  group_by(county) %>% 
+  summarize(
+    hu = Sum(hu), hu_in = round(Sum(hu_in)), hu_out = hu-hu_in,
+    exp_in = round(Sum(exp_in)), exp_out = round(Sum(exp_out)), 
+    .groups = 'drop') %>% 
+  full_join(policies_bycounty, by = 'county') %>% 
+  mutate(across(c(ends_with('in'), ends_with('out')), ~setNA(.,0))) %>% 
+  left_join(
+    california %>% st_drop_geometry %>% select(NAME,COUNTYFP), 
+    by = c('county' = 'COUNTYFP')) %>% 
+  mutate(hu = hu_in+hu_out, policies = policies_in+policies_out, exp = exp_in+exp_out) %>%
+  mutate(takeup_obs = policies/hu, takeup_exp = exp/hu)
+takeup_bycounty %>% summarize(across(c(ends_with('in'), ends_with('out')), Sum))
+
+takeup_bycounty %>% 
+  select(NAME, policies_in, exp_in, policies_out, exp_out, takeup_obs, takeup_exp) %>% 
+  gt %>% 
+  fmt_markdown(NAME) %>% 
+  fmt_number(c(ends_with('in'), ends_with('out')), decimals = 0) %>% 
+  fmt_percent(starts_with('takeup')) %>% 
+  tab_spanner(label = html('Policyholders<br>Within Floodplain'), columns = ends_with('in')) %>% 
+  tab_spanner(label = html('Policyholders<br>Outside Floodplain'), columns = ends_with('out')) %>% 
+  tab_spanner(label = html('County-Level<br>Takeup Rate'), columns = starts_with('takeup')) %>% 
+  cols_label(
+    NAME = 'County',
+    policies_in = 'Observed',
+    exp_in = 'Expected',
+    policies_out = 'Observed',
+    exp_out = 'Expected',
+    takeup_obs = 'Observed',
+    takeup_exp = 'Expected'
+  ) %>% 
+  tab_header('Observed vs. Expected County-Level NFIP Behavior') %>% 
+  tab_options(
+    heading.background.color = '#d9d9d9', 
+    column_labels.background.color = '#f2f2f2')
+
+```
+
+```{r fig.width = 6, fig.height = 3.5}
+g1 <- ggplot(takeup_bycounty) + 
+  geom_ribbon(
+    data = data.frame(x = (0:(max(takeup_bycounty$takeup_exp+0.01)*1e4))/1e4) %>% 
+      mutate(lower = positive(x-0.01), upper = x+0.01),
+    aes(x = x, ymin = lower, ymax = upper), fill = 'grey70', alpha = 0.25) + 
+  geom_point(aes(x = takeup_exp, y = takeup_obs), size = 1) + 
+  geom_text(
+    data = takeup_bycounty %>% filter(abs(takeup_exp-takeup_obs) > 0.03),
+    aes(x = takeup_exp, y = takeup_obs, label = NAME),
+    family = 'Segoe UI', size = 7/.pt, color = 'grey40', 
+    nudge_x = 0, nudge_y = -0.005) + 
+  scale_x_origin(labels = percent) + scale_y_origin(labels = percent) +
+  geom_parity() + coord_cartesian(xlim = range(takeup_bycounty$takeup_exp)) + 
+  labs(x = 'Expected Takeup Rate', y = 'Observed Takeup Rate') + 
+  theme(panel.grid.major = element_line(size = 0.25))
+g2 <- ggplot(takeup_bycounty) + 
+  geom_ribbon(
+    data = data.frame(x = 10*(1:(max(takeup_bycounty$exp)/10+1e3))) %>% 
+      mutate(half = x/2, double = x*2),
+    aes(x = x, ymin = half, ymax = double), fill = 'grey70', alpha = 0.25) + 
+  geom_text(
+    data = takeup_bycounty %>% filter(policies/exp > 5),
+    aes(x = exp, y = policies*1.45, label = NAME),
+    family = 'Segoe UI', size = 7/.pt, color = 'grey40', 
+    nudge_x = 0, nudge_y = 0) + 
+  geom_text(
+    data = takeup_bycounty %>% filter(exp/policies > 5),
+    aes(x = exp, y = (policies+c(0,1.5,0,0))/1.35, label = NAME),
+    family = 'Segoe UI', size = 7/.pt, color = 'grey40', 
+    nudge_x = c(0.15,0,0,0,0), nudge_y = c(0,0,0,0,0)) + 
+  geom_point(aes(x = exp, y = policies), size = 1) + 
+  scale_x_log10(labels = comma) + scale_y_log10(labels = comma) + 
+  annotation_logticks(sides = 'bl', size = 0.25, color = 'grey25') + 
+  geom_parity() + coord_fixed(clip = 'off', xlim = range(takeup_bycounty$exp)) + 
+  labs(x = 'Expected Number of Policies', y = 'Observed Number of Policies') + 
+  theme(panel.grid.major = element_line(size = 0.25))
+g2 + g1 + 
+  plot_layout(widths = c(1,1)) + 
+  plot_annotation(
+    # title = 'County-Level Takeup Rates',
+    tag_levels = 'a', tag_prefix = '(', tag_suffix = ')') &
+  theme(
+    plot.tag = element_text(size = 10, face = 'bold'),
+    plot.tag.position = c(0,1))
+ggsave('_figures/fig6_takeup.png', width = 6, height = 3.5)
+
+```
