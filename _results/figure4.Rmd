@@ -67,7 +67,6 @@ nsamp <- 1000
 
 ```
 
-
 ### Statewide
 
 ```{r}
@@ -1237,7 +1236,110 @@ ggsave('_figures/fig4_impact_sac2009.png', width = 6, height = 6)
 
 ```
 
-```{r}
+# Respond to reviewer comments
+
+## Create multiple realizations of Fig 4d (total housing units)
+
+```{r fig.width=8, fig.height=2.5}
+xname <- 'pop_pct_floodplain'
+xbase <- gbase + 
+  labs(
+    title = 'Exposure',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20),
+    y = 'SHAP Feature Contribution') +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.02))) + 
+  coord_cartesian(ylim = rangeexp) + 
+  theme(
+    axis.line.y.right = element_blank(), 
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    plot.title = element_blank())
+
+samp1 <- sample(1:nrow(df.pca.cty.1981), nsamp)
+x1 <- xbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp1) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp1) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  theme(
+    axis.title.y = element_text(),
+    axis.text.y = element_text())
+
+samp2 <- sample(1:nrow(df.pca.cty.1981), nsamp)
+x2 <- xbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp2) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp2) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25)
+
+samp3 <- sample(1:nrow(df.pca.cty.1981), nsamp)
+x3 <- xbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp3) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp3) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25)
+
+samp4 <- sample(1:nrow(df.pca.cty.1981), nsamp)
+x4 <- xbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp4) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp4) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25)
+
+x1 + x2 + x3 + x4 + plot_layout(nrow = 1)
+ggsave('_figures/review_4d.png', width = 8, height = 2.25)
 
 ```
 
+## Create multiple realizations of Fig 4e (percent population in floodplain)
+
+```{r fig.width=8, fig.height=2.5}
+xname <- 'loghu'
+xbase <- gbase + 
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20),
+    y = 'SHAP Feature Contribution') +
+  scale_x_log10() +
+  annotation_logticks(sides = 'b', size = 0.25, color = 'grey25') + 
+  coord_cartesian(ylim = rangeexp) +
+  theme(
+    axis.line.y.right = element_blank(), 
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    plot.title = element_blank())
+
+samp1 <- sample(1:nrow(df.pca.cty.1981), nsamp)
+x1 <- xbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp1) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp1) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25) + 
+  theme(
+    axis.title.y = element_text(),
+    axis.text.y = element_text())
+
+samp2 <- sample(1:nrow(df.pca.cty.1981), nsamp)
+x2 <- xbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp2) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp2) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25)
+
+samp3 <- sample(1:nrow(df.pca.cty.1981), nsamp)
+x3 <- xbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp3) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp3) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25)
+
+samp4 <- sample(1:nrow(df.pca.cty.1981), nsamp)
+x4 <- xbase + 
+  geom_point(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp4) %>% 
+      mutate(y = shap.cty.1981 %>% data.frame %>% slice(samp4) %>% pull(xname)),
+    aes(x = x, y = y), size = ptsize, color = ptcol, alpha = 0.25)
+
+x1 + x2 + x3 + x4 + plot_layout(nrow = 1)
+ggsave('_figures/review_4e.png', width = 8, height = 2.25)
+
+```

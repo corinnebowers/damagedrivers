@@ -17,7 +17,7 @@ output:
 knitr::opts_knit$set(root.dir = 'D:/04-MLDD/')
 knitr::opts_chunk$set(warning = FALSE, message = FALSE)
 knitr::opts_chunk$set(results = 'hold', fig.show = 'hold', fig.align = 'center')
-rm(list=ls())
+# rm(list=ls())
 
 ```
 
@@ -37,6 +37,7 @@ suppressPackageStartupMessages({
   require(ggbeeswarm)
   require(iml)
   require(ggrepel)
+  require(extrafont); windowsFonts("Segoe UI" = windowsFont("Segoe UI"))
 })
 
 label_wrap <- function(variable, value) {
@@ -917,6 +918,8 @@ g3v <- gbase +
 
 ```
 
+### Combine into one figure
+
 ```{r fig.width=6, fig.height=6}
 g1h + g2h + g3h +
   g1e + g2e + g3e + 
@@ -1053,8 +1056,13 @@ gbase <- ggplot() +
     panel.grid.major.y = element_line(size = 0.25),
     plot.tag = element_text(size = 10, face = 'bold'),
     plot.tag.position = c(0.025,0.975),
-    plot.margin = ggplot2::margin(16,2,2,2))
-  
+    plot.margin = ggplot2::margin(2,2,2,2))
+
+```
+
+### Exposure 
+
+```{r}
 xname <- 'loghu'
 g1 <- gbase + 
   geom_smooth(
@@ -1069,7 +1077,7 @@ g1 <- gbase +
     breaks = 10^(1:10), 
     labels = c('10','100','1K','10K','100K','1M','10M','100M','1B','10B')) + 
   labs(
-    title = '   Exposure',
+    title = 'Exposure',
     x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 18)) + 
   geom_rug(
     data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% select(x),
@@ -1078,8 +1086,25 @@ g1 <- gbase +
     plot.title = element_text(face = 'bold', color = '#71938f'),
     plot.tag.position = c(0.25,0.975))
 
-xname <- 'pct_sfh'
+xname <- 'pop_pct_floodplain'
 g2 <- gbase + 
+  geom_smooth(
+    data = bycat.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      left_join(dimension, by = c('.feature' = 'var')) %>% 
+      select(.borders, .value, cat) %>% 
+      setNames(c(xname,'y','cat')) %>% transfm(.,xname),
+    aes(x = x, y = y, group = factor(cat), color = factor(cat)),
+    size = 0.75, se = FALSE, span = 0.25) + 
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.02,0.05))) + 
+  labs(x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 18)) + 
+  geom_rug(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% select(x),
+    aes(x = x), size = 0.25, alpha = 0.25) + 
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank())
+
+xname <- 'pct_sfh'
+g3 <- gbase + 
   geom_smooth(
     data = bycat.cty.1981 %>% 
       filter(.feature == xname) %>% 
@@ -1095,27 +1120,22 @@ g2 <- gbase +
     aes(x = x), size = 0.25, alpha = 0.25) + 
   theme(axis.title.y = element_blank(), axis.text.y = element_blank())
 
-xname <- 'cal_polburd'
-g3 <- gbase + 
-  geom_smooth(
-    data = bycat.cty.1981 %>% 
-      filter(.feature == xname) %>% 
-      left_join(dimension, by = c('.feature' = 'var')) %>% 
-      select(.borders, .value, cat) %>% 
-      setNames(c(xname,'y','cat')) %>% transfm(.,xname),
-    aes(x = x, y = y, group = factor(cat), color = factor(cat)),
-    size = 0.75, se = FALSE, span = 0.25) + 
-  scale_x_continuous() +
-  labs(
-    title = '   Vulnerability',
-    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) + 
-  geom_rug(
-    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% select(x),
-    aes(x = x), size = 0.25, alpha = 0.25) + 
-  theme(
-    plot.title = element_text(face = 'bold', color = colors.hev[3]),
-    axis.title.y = element_blank(), axis.text.y = element_blank())
+```
 
+```{r}
+g1 + g2 + g3 + guide_area() + 
+  plot_layout(design = 'abc\nddd', heights = c(10,1), guides = 'collect') +
+  plot_annotation(tag_levels = 'a', tag_prefix = '(', tag_suffix = ')') &
+  theme(
+    plot.tag = element_text(face = 'bold'),
+    plot.tag.position = c(0.12,0.975)) #1.01 without the title
+ggsave('_figures/fig5_interaction.png', width = 6, height = 2.5)
+
+```
+
+### Vulnerability
+
+```{r}
 xname <- 'CRS'
 g4 <- gbase + 
   geom_line(
@@ -1127,19 +1147,75 @@ g4 <- gbase +
     aes(x = x, y = y, group = factor(cat), color = factor(cat)),
     size = 0.75, show.legend = FALSE) + 
   scale_x_continuous(breaks = 2:10) + 
-  labs(x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 18)) + 
+  labs(
+    title = 'Vulnerability',
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 18)) + 
   geom_rug(
     data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% select(x),
     aes(x = jitter(x)), size = 0.25, alpha = 0.25) + 
-  theme(axis.title.y = element_blank(), axis.text.y = element_blank())
+  theme(
+    plot.title = element_text(face = 'bold', color = colors.hev[3]))
+
+xname <- 'hhincome22'
+g5 <- gbase + 
+  geom_smooth(
+    data = bycat.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      left_join(dimension, by = c('.feature' = 'var')) %>% 
+      select(.borders, .value, cat) %>% 
+      setNames(c(xname,'y','cat')) %>% transfm(.,xname),
+    aes(x = x, y = y, group = factor(cat), color = factor(cat)),
+    size = 0.75, se = FALSE, span = 0.25) + 
+  scale_x_continuous(labels = comma_format(scale = 1e-3, prefix = '$', suffix = 'K')) + 
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) + 
+  geom_rug(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% select(x),
+    aes(x = x), size = 0.25, alpha = 0.25) + 
+  theme(
+    axis.title.y = element_blank(), axis.text.y = element_blank())
+
+xname <- 'cal_polburd'
+g6 <- gbase + 
+  geom_smooth(
+    data = bycat.cty.1981 %>% 
+      filter(.feature == xname) %>% 
+      left_join(dimension, by = c('.feature' = 'var')) %>% 
+      select(.borders, .value, cat) %>% 
+      setNames(c(xname,'y','cat')) %>% transfm(.,xname),
+    aes(x = x, y = y, group = factor(cat), color = factor(cat)),
+    size = 0.75, se = FALSE, span = 0.25) + 
+  scale_x_continuous() +
+  labs(
+    x = dimension$fullname[dimension$var==xname] %>% str_wrap(width = 20)) + 
+  geom_rug(
+    data = transfm(df.pca.cty.1981, xname) %>% slice(samp.cty.1981) %>% select(x),
+    aes(x = x), size = 0.25, alpha = 0.25) + 
+  theme(
+    axis.title.y = element_blank(), axis.text.y = element_blank())
 
 ```
 
 ```{r}
-g1 + g2 + g3 + g4 + guide_area() + 
-  plot_layout(design = 'abcd\neeee', guides = 'collect', heights = c(10,1)) + 
-  plot_annotation(tag_levels = 'a', tag_prefix = '(', tag_suffix = ')')
-ggsave('_figures/fig5_interaction.png', width = 6.5, height = 2.5)
+g4 + g5 + g6 + guide_area() + 
+  plot_layout(design = 'abc\nddd', heights = c(10,1), guides = 'collect')
 
 ```
+
+### Combine into one plot
+
+```{r}
+g1 + g2 + g3 + g4 + g5 + g6 + guide_area() + 
+  plot_layout(design = 'abc\ndef\nggg', guides = 'collect', heights = c(10,10,1)) + 
+  plot_annotation(tag_levels = 'a', tag_prefix = '(', tag_suffix = ')') &
+  theme(
+    plot.tag = element_text(face = 'bold'),
+    plot.tag.position = c(0.12,0.975)) #1.01 without the title
+ggsave('_figures/review_5.png', width = 6, height = 4.5)
+
+```
+
+# Respond to reviewer comments
+
+add pop in floodplain & median income to fig 5
 
