@@ -1,2 +1,3 @@
 *.Rdata
 _scripts/old/*
+_figures/*

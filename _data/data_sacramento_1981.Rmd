@@ -1,0 +1,2387 @@
+---
+title: "Data Collection and Cleaning: Sacramento Model"
+date: "2023-05-10"
+author: Corinne Bowers
+output:
+  html_document:
+    toc: true 
+    toc_float: true
+    #toc_depth: 3  
+    code_folding: show
+    # number_sections: false 
+    theme: spacelab   #https://www.datadreaming.org/post/r-markdown-theme-gallery/
+    highlight: tango  #https://www.garrickadenbuie.com/blog/pandoc-syntax-highlighting-examples/
+---
+
+This script details the collection and assembly of panel data at the census tract-event level for a random forest model of AR-driven flooding in Sacramento County, California.
+For each data type, the original source of the data is provided and the steps to aggregate and clean the data are explained.
+
+Some of the data processing steps are quite time consuming, so intermediate results are saved at regular checkpoint locations throughout the script.
+Uncommenting the code blocks above each checkpoint will reproduce the original results.
+
+```{r setup, include = FALSE}
+knitr::opts_knit$set(root.dir = 'D:/04-MLDD/')
+knitr::opts_chunk$set(results = 'hold', fig.show = 'hold', fig.align = 'center')
+
+```
+
+# Setup
+
+## Load packages & functions 
+
+```{r}
+source('_data/setup.R')
+source('_data/create_df_functions.R')
+
+```
+
+## Define user polygons
+
+The dataframe $polys$ defines the spatial unit of analysis, which in this case is census tracts in Sacramento County.
+
+```{r}
+## define tracts as polygons of interest 
+polys <- tracts(state = 'CA', county = 'Sacramento', year = 2021) %>% 
+  arrange(TRACTCE) %>%  
+  transmute(id = 1:nrow(.), name = TRACTCE, geometry) 
+
+## calculate polygon area
+polys <- polys %>% 
+  st_transform(projected) %>%  
+  mutate(area = toNumber(st_area(.))) %>% 
+  st_transform(st_crs(polys))
+
+## turn progress bars on/off
+progressbar <- FALSE
+if (progressbar) pb <- txtProgressBar(min = 0, max = nrow(polys), style = 3)
+opts <- if (progressbar) list(progress = function(x) setTxtProgressBar(pb,x)) else NULL
+
+```
+
+## Calculate inflation 
+
+Inflation is calculated based on historical data from the Bureau of Labor Statistics to appropriately compare dollar values over time.
+
+```{r}
+bls <- 
+  read.table('_data/BLS/cu.data.2.Summaries.txt', sep = '\t', header = TRUE) %>%
+  filter(grepl('CUUR0000SA0', series_id)) %>% 
+  separate(period, into = c('period', 'month'), sep = 1, remove = TRUE) %>% 
+  mutate(month = toNumber(month)) %>%
+  filter(period == 'M' & month %in% 1:12) %>% 
+  transmute(year, month, cpi = value)
+
+inflation.df <- data.frame(year = 1980:2022) %>% 
+  mutate(adj_factor = map_dbl(
+    .x = year, .f = ~calculate_inflation(yr = .x, ref_yr = 2022, bls = bls)))
+
+```
+
+## Identify decadal tract changes
+
+Census tracts are drawn to have roughly 4,000 people (somewhere between 2,500-8,000) and are updated with every decadal census. 
+Our dataset spans five decades, going back to 1980.
+Matching relationships between census tracts from different census generations are only available for 2000, 2010, and 2020, but in no case did we have tract-level data for years prior to 2000 either. 
+So for all tract-level values between 2000 and 2019, we used the matching table in this section to translate those values to 2020 tracts; for county-level or state-level values prior to 2000, we did a weighted distribution among the 2000 tracts.
+
+```{r}
+# column names: https://www.census.gov/programs-surveys/geography/technical-documentation/records-layout/2010-census-tract-record-layout.html
+convert2000 <- read.table(
+  'https://www2.census.gov/geo/docs/maps-data/data/rel/trf_txt/ca06trf.txt',
+  sep = ',', header = FALSE) %>% 
+  setNames(c(
+    'STATE00','COUNTY00','TRACT00','GEOID00','POP00','HU00','PART00','AREA00',
+    'AREALAND00','STATE10','COUNTY10','TRACT10','GEOID10','POP10','HU10','PART10',
+    'AREA10','AREALAND10','AREAPT','AREALANDPT','AREAPCT00PT','AREALANDPCT00PT',
+    'AREAPCT10PT','AREALANDPCT10PT','POP10PT','POPPCT00','POPPCT10','HU10PT',
+    'HUPCT00','HUPCT10'))
+convert2010 <- read.table(
+  'https://www2.census.gov/geo/docs/maps-data/data/rel2020/tract/tab20_tract20_tract10_st06.txt', 
+  sep = '|', header = TRUE) 
+convert <- 
+  convert2000 %>% select(GEOID00, GEOID10) %>% 
+  full_join(
+    convert2010 %>% transmute(GEOID_TRACT_10, GEOID20 =GEOID_TRACT_20), 
+    by = c('GEOID10' = 'GEOID_TRACT_10'))
+
+```
+
+```{r}
+## determine which counties need to be downloaded
+convert %>% 
+  filter(str_sub(GEOID20,1,4) == '6067') %>% 
+  filter(str_sub(GEOID00,1,4) != '6067' | str_sub(GEOID10,1,4) != '6067' | str_sub(GEOID20,1,4) != '6067') %>% 
+  mutate(across(everything(), ~str_sub(.,1,4))) %>% select(-GEOID20) %>% unlist %>% unique
+
+```
+
+# Load hazard data
+
+## AR characteristics
+
+AR characteristics and lagged hydrologic features from antecedent conditions were calculated together for each county, resulting in the following variables:
+
+* AR category,
+* AR maximum IVT (kg/m/s),
+* AR duration (hr),
+* AR storm-total precipitation (mm),
+* AR max 3-hour precipitation (mm/hr),
+* Lagged precipitation totals at 3, 7, 14, and 30 days before the AR event (mm), and 
+* Lagged soil moisture averages at 3, 7, 14, and 30 days before the AR event (mm/m).
+
+The data for all AR characteristics and lagged hydrologic features are available starting in 1980 and vary at the daily temporal scale.
+They vary spatially at the resolution of the MERRA-2 grid (IVT, precipitation), which is approximately 50km x 50km, or finer (soil moisture). 
+
+The MERRA-2 grid is larger than all census tracts in Sacramento County; in fact, only four grid cells total intersect with the county. In order to create tract-level catalogs of AR events, we identified which grid cell(s) covered the tract and assigned ARs accordingly.
+
+```{r}
+# ## load AR information by grid cell
+# load('D:/02-sequences/_scripts/_checkpoints/df_3hr_1209.Rdata')
+# 
+# ## define AR threshold 
+# # (percentage of grid cells that need to agree to label a time interval as an AR)
+# ar.threshold <- 0.5
+# 
+# ## define coverage threshold
+# # (percent of a grid cell that has to fall within the polygon to be considered)
+# cover.threshold <- 0.1
+
+```
+
+```{r}
+# ## create AR catalogs by polygon
+# TS <- df_3hr[[20]]$ts
+# 
+# ## subset grid_ca
+# grid_sac <- grid_ca %>% crop(polys, snap = 'out') %>% disaggregate(100) %>% rast
+# st_grid <- grid_ca %>% rasterToPolygons %>% st_as_sf %>% .[polys,]
+
+# # cl <- makeCluster(cores)
+# # registerDoSNOW(cl)
+# # catalogs <- list()
+# # foreach (
+# #   j = 1:nrow(polys),
+# #   .export = c('assign_AR_cat', 'create_catalog'),
+# #   .packages = c('raster', 'sf', 'terra', 'stars', 'tidyverse', 'lubridate'),
+# #   .options.snow = opts) %dopar% {
+#   for (j in 1:nrow(polys)) {
+#     if (progressbar) setTxtProgressBar(pb,j)
+# 
+#       ## get cells associated with each polygon
+#       cover.id <- st_grid[polys[j,],] %>% pull(layer)
+#       cover.pct <- 1
+#       if (length(cover.id) > 1) {
+#         cover <- terra::rasterize(vect(polys[j,]), grid_sac)
+#         sac.id <- which(c(cover[]) > cover.threshold | c(cover[]/Sum(cover[]) > cover.threshold))
+#         cover.id <- sac.id %>% grid_sac[.] %>% unlist %>% unname
+#         cover.pct <- (cover[sac.id]/Sum(cover[sac.id])) %>% unlist %>% unname
+#         cover.pct <- data.frame(pct = cover.pct) %>%
+#           group_by(level = match(cover.id, unique(cover.id))) %>%
+#           summarize(pct = sum(pct)) %>% pull(pct)
+#         cover.id <- unique(cover.id)
+#       }
+# 
+#       ## combine ARs from associated cells
+#       ar.pct <-
+#         map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ar)) %>%
+#         apply(1, function(x) sum(x)/length(x))
+# 
+#       ## create catalog
+#       sm.matrix <- as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(sm)))
+#       sm.valid <- which(apply(sm.matrix,2,sum.na)==0)
+#       timeseries <-
+#         data.frame(
+#           ts = TS,
+#           ar = ar.pct >= ar.threshold,
+#           ivt = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(ivt))) %*%
+#             as.matrix(cover.pct),
+#           precip = as.matrix(map_dfc(.x = cover.id, .f = ~df_3hr[[.x]] %>% select(precip))) %*%
+#             as.matrix(cover.pct),
+#           sm = sm.matrix[,sm.valid] %*% as.matrix(cover.pct[sm.valid]/sum(cover.pct[sm.valid]))) %>%
+#         mutate(count = add_counter(ar))
+#       catalog <- create_catalog(timeseries, name = 'ar') %>% filter(cat > 0)
+# 
+#       ## add lagged variables
+#       catalogs[[j]] <- timeseries %>%
+#         mutate(
+#           precip_lag03 = lag(precip, 3*8, align = 'right', fun = 'sum'),
+#           precip_lag07 = lag(precip, 7*8, align = 'right', fun = 'sum'),
+#           precip_lag14 = lag(precip, 14*8, align = 'right', fun = 'sum'),
+#           precip_lag30 = lag(precip, 30*8, align = 'right', fun = 'sum'),
+#           sm_lag03 = lag(sm, 3*8, align = 'right', fun = 'mean'),
+#           sm_lag07 = lag(sm, 7*8, align = 'right', fun = 'mean'),
+#           sm_lag14 = lag(sm, 14*8, align = 'right', fun = 'mean'),
+#           sm_lag30 = lag(sm, 30*8, align = 'right', fun = 'mean')) %>%
+#         filter(ar) %>%
+#         group_by(count) %>%
+#         summarize(
+#           ar.start = ts[1],
+#           logprecip_total = log10(sum(precip)+1),
+#           logprecip_max = log10(max(precip)/3+1),
+#           across(contains('lag'), ~.[1])) %>%
+#         mutate(
+#           logprecip_lag03 = ifelse(ar.start-days(3) < TS[1], NA, log10(precip_lag03+1)),
+#           logprecip_lag07 = ifelse(ar.start-days(7) < TS[1], NA, log10(precip_lag07+1)),
+#           logprecip_lag14 = ifelse(ar.start-days(14) < TS[1], NA, log10(precip_lag14+1)),
+#           logprecip_lag30 = ifelse(ar.start-days(30) < TS[1], NA, log10(precip_lag30+1)),
+#           sm_lag03 = ifelse(ar.start-days(3) < TS[1], NA, sm_lag03),
+#           sm_lag07 = ifelse(ar.start-days(7) < TS[1], NA, sm_lag07),
+#           sm_lag14 = ifelse(ar.start-days(14) < TS[1], NA, sm_lag14),
+#           sm_lag30 = ifelse(ar.start-days(30) < TS[1], NA, sm_lag30)) %>%
+#         select(-ar.start, -starts_with('precip')) %>%
+#         left_join(catalog, ., by = 'count') %>%
+#         mutate(id = j)
+#     }
+# # stopCluster(cl)
+
+```
+
+```{r}
+## checkpoint
+# save(catalogs, file = '_data/_checkpoints/sac_base_0426.Rdata')
+load('_data/_checkpoints/sac_base_0426.Rdata')
+
+```
+
+## Climate modes
+
+Climate mode features are drawn from indices calculated by NOAA. 
+They do not vary spatially and vary temporally by month.
+
+```{r}
+## PDO
+PDO <- read.table(
+  'https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.pdo.dat',
+  header = TRUE, skip = 1) %>% 
+  pivot_longer(cols = -Year, names_to = 'Month', values_to = 'PDO') %>% 
+  mutate(Month = as.numeric(factor(Month, levels = Month[1:12])))
+
+## ENSO
+ENSO <- read.table(
+  'https://psl.noaa.gov/enso/mei/data/meiv2.data',
+  header = FALSE, skip = 1, fill = TRUE) %>% 
+  .[1:44,] %>% 
+  mutate(Year = toNumber(V1)) %>% select(-V1) %>%  
+  pivot_longer(cols = -Year, names_to = 'Month', values_to = 'ENSO') %>% 
+  mutate(Month = as.numeric(factor(Month, levels = Month[1:12]))) %>% 
+  mutate(ENSO = toNumber(ENSO))
+  
+```
+
+```{r}
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      select(-starts_with('PDO'), -starts_with('ENSO')) %>% 
+      mutate(Year = year(start), Month = month(start)) %>% 
+      left_join(PDO, by = c('Year', 'Month')) %>% 
+      left_join(ENSO, by = c('Year', 'Month')) %>% 
+      select(-Year, -Month)
+  }
+
+```
+
+## Land surface variables
+
+Imperviousness and land cover features are both based on the National Land Cover Database (NLCD).
+The data is available spatially at a very fine resolution, so we aggregate it to a percentage of each tract that is covered by either impervious surfaces or specific land classes.
+The developed land classes are 21, 22, 23, and 24.
+The wetlands land classes are 90 and 95. 
+More information about the different land classes can be found here: https://www.mrlc.gov/data/legends/national-land-cover-database-class-legend-and-description.
+
+The NLCD has released eight generations of data: 2001, 2004, 2006, 2008, 2011, 2013, 2016, and 2019. 
+Prior to 2001, we assume that all values are constant at 2001 levels, so there is no temporal variation.
+From 2001 to 2019, temporal variation comes from interpolating values between each data generation.
+All values for 2019 and after are constant at 2019 values. 
+
+### Imperviousness
+
+```{r}
+# https://doi.org/10.1016/j.rse.2021.112357
+
+# imperv_pct <- function(df) {
+#   df %>%
+#     filter(value <= 100) %>%
+#     summarize(x = weighted.mean(x = value, w = coverage_fraction)) %>%
+#     pull(x)
+# }
+# 
+# timer <- Sys.time()
+# imperv2019 <-
+#   rast('_data/NLCD-impervious/nlcd_2019_impervious_l48_20210604/nlcd_2019_impervious_l48_20210604.img')
+# pct2019 <- exact_extract(
+#   imperv2019, polys,
+#   fun = imperv_pct, summarize_df = TRUE, progress = progressbar)
+# imperv2016 <-
+#   rast('_data/NLCD-impervious/nlcd_2016_impervious_l48_20210604/nlcd_2016_impervious_l48_20210604.img')
+# pct2016 <- exact_extract(
+#   imperv2016, polys,
+#   fun = imperv_pct, summarize_df = TRUE, progress = progressbar)
+# imperv2013 <-
+#   rast('_data/NLCD-impervious/nlcd_2013_impervious_l48_20210604/nlcd_2013_impervious_l48_20210604.img')
+# pct2013 <- exact_extract(
+#   imperv2013, polys,
+#   fun = imperv_pct, summarize_df = TRUE, progress = progressbar)
+# imperv2011 <-
+#   rast('_data/NLCD-impervious/nlcd_2011_impervious_l48_20210604/nlcd_2011_impervious_l48_20210604.img')
+# pct2011 <- exact_extract(
+#   imperv2011, polys,
+#   fun = imperv_pct, summarize_df = TRUE, progress = progressbar)
+# imperv2008 <-
+#   rast('_data/NLCD-impervious/nlcd_2008_impervious_l48_20210604/nlcd_2008_impervious_l48_20210604.img')
+# pct2008 <- exact_extract(
+#   imperv2008, polys,
+#   fun = imperv_pct, summarize_df = TRUE, progress = progressbar)
+# imperv2006 <-
+#   rast('_data/NLCD-impervious/nlcd_2006_impervious_l48_20210604/nlcd_2006_impervious_l48_20210604.img')
+# pct2006 <- exact_extract(
+#   imperv2006, polys,
+#   fun = imperv_pct, summarize_df = TRUE, progress = progressbar)
+# imperv2004 <-
+#   rast('_data/NLCD-impervious/nlcd_2004_impervious_l48_20210604/nlcd_2004_impervious_l48_20210604.img')
+# pct2004 <- exact_extract(
+#   imperv2004, polys,
+#   fun = imperv_pct, summarize_df = TRUE, progress = progressbar)
+# imperv2001 <-
+#   rast('_data/NLCD-impervious/nlcd_2001_impervious_l48_20210604/nlcd_2001_impervious_l48_20210604.img')
+# pct2001 <- exact_extract(
+#   imperv2001, polys,
+#   fun = imperv_pct, summarize_df = TRUE, progress = progressbar)
+# Sys.time() - timer
+## takes about ten minutes
+
+```
+
+```{r}
+## checkpoint
+# save(
+#   pct2019, pct2016, pct2013, pct2011, pct2008, pct2006, pct2004, pct2001,
+#   file = '_data/_checkpoints/sac_imperv_0420.Rdata')
+load('_data/_checkpoints/sac_imperv_0420.Rdata')
+
+```
+
+```{r}
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(
+        pct_imperv = interp1(
+          x = c(1980,2001,2004,2006,2008,2011,2013,2016,2019,2022),
+          y = c(pct2001[j], pct2001[j], pct2004[j], pct2006[j], pct2008[j], pct2011[j], 
+                pct2013[j], pct2016[j], pct2019[j], pct2019[j]),
+          xi = year(start)))
+  }
+
+```
+
+### Land cover (developed & wetlands)
+
+```{r}
+## download LULC maps
+# LULC classes: https://www.mrlc.gov/data/legends/national-land-cover-database-class-legend-and-description
+
+# get.lulc <- function(x, class) x %>%
+#   group_by(value) %>%
+#   summarize(coverage = sum(coverage_fraction), .groups = 'drop') %>%
+#   mutate(fraction = prop.table(coverage)) %>%
+#   filter(value %in% class) %>%
+#   .$fraction %>% sum
+# class.developed <- 21:24
+# class.wetlands <- c(90,95)
+# 
+# timer <- Sys.time()
+# lulc2019 <-
+#   rast('_data/NLCD-landcover/nlcd_2019_land_cover_l48_20210604/nlcd_2019_land_cover_l48_20210604.img')
+# temp <- lulc2019 %>% exact_extract(polys, progress = progressbar)
+# dvp2019 <- lapply(temp, function(x) get.lulc(x, class = class.developed)) %>% reduce(c)
+# wet2019 <- lapply(temp, function(x) get.lulc(x, class = class.wetlands)) %>% reduce(c)
+# rm(temp); gc()
+# 
+# lulc2016 <-
+#   rast('_data/NLCD-landcover/nlcd_2016_land_cover_l48_20210604/nlcd_2016_land_cover_l48_20210604.img')
+# temp <- lulc2016 %>% exact_extract(polys, progress = progressbar)
+# dvp2016 <- lapply(temp, function(x) get.lulc(x, class = class.developed)) %>% reduce(c)
+# wet2016 <- lapply(temp, function(x) get.lulc(x, class = class.wetlands)) %>% reduce(c)
+# rm(temp); gc()
+# 
+# lulc2013 <-
+#   rast('_data/NLCD-landcover/nlcd_2013_land_cover_l48_20210604/nlcd_2013_land_cover_l48_20210604.img')
+# temp <- lulc2013 %>% exact_extract(polys, progress = progressbar)
+# dvp2013 <- lapply(temp, function(x) get.lulc(x, class = class.developed)) %>% reduce(c)
+# wet2013 <- lapply(temp, function(x) get.lulc(x, class = class.wetlands)) %>% reduce(c)
+# rm(temp); gc()
+# 
+# lulc2011 <-
+#   rast('_data/NLCD-landcover/nlcd_2011_land_cover_l48_20210604/nlcd_2011_land_cover_l48_20210604.img')
+# temp <- lulc2011 %>% exact_extract(polys, progress = progressbar)
+# dvp2011 <- lapply(temp, function(x) get.lulc(x, class = class.developed)) %>% reduce(c)
+# wet2011 <- lapply(temp, function(x) get.lulc(x, class = class.wetlands)) %>% reduce(c)
+# rm(temp); gc()
+# 
+# lulc2008 <-
+#   rast('_data/NLCD-landcover/nlcd_2008_land_cover_l48_20210604/nlcd_2008_land_cover_l48_20210604.img')
+# temp <- lulc2008 %>% exact_extract(polys, progress = progressbar)
+# dvp2008 <- lapply(temp, function(x) get.lulc(x, class = class.developed)) %>% reduce(c)
+# wet2008 <- lapply(temp, function(x) get.lulc(x, class = class.wetlands)) %>% reduce(c)
+# rm(temp); gc()
+# 
+# lulc2006 <-
+#   rast('_data/NLCD-landcover/nlcd_2006_land_cover_l48_20210604/nlcd_2006_land_cover_l48_20210604.img')
+# temp <- lulc2006 %>% exact_extract(polys, progress = progressbar)
+# dvp2006 <- lapply(temp, function(x) get.lulc(x, class = class.developed)) %>% reduce(c)
+# wet2006 <- lapply(temp, function(x) get.lulc(x, class = class.wetlands)) %>% reduce(c)
+# rm(temp); gc()
+# 
+# lulc2004 <-
+#   rast('_data/NLCD-landcover/nlcd_2004_land_cover_l48_20210604/nlcd_2004_land_cover_l48_20210604.img')
+# temp <- lulc2004 %>% exact_extract(polys, progress = progressbar)
+# dvp2004 <- lapply(temp, function(x) get.lulc(x, class = class.developed)) %>% reduce(c)
+# wet2004 <- lapply(temp, function(x) get.lulc(x, class = class.wetlands)) %>% reduce(c)
+# rm(temp); gc()
+# 
+# lulc2001 <-
+#   rast('_data/NLCD-landcover/nlcd_2001_land_cover_l48_20210604/nlcd_2001_land_cover_l48_20210604.img')
+# temp <- lulc2001 %>% exact_extract(polys, progress = progressbar)
+# dvp2001 <- lapply(temp, function(x) get.lulc(x, class = class.developed)) %>% reduce(c)
+# wet2001 <- lapply(temp, function(x) get.lulc(x, class = class.wetlands)) %>% reduce(c)
+# rm(temp); gc()
+# Sys.time() - timer
+## takes about twenty minutes
+
+```
+
+```{r}
+## checkpoint
+# save(dvp2001,dvp2004,dvp2006,dvp2008,dvp2011,dvp2013,dvp2016,dvp2019,
+#      wet2001,wet2004,wet2006,wet2008,wet2011,wet2013,wet2016,wet2019,
+#      file = '_data/_checkpoints/sac_lulc_0419.Rdata')
+load('_data/_checkpoints/sac_lulc_0419.Rdata')
+
+```
+
+```{r}
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(
+        pct_developed = interp1(
+          x = c(1980,2001,2004,2006,2008,2011,2013,2016,2019,2022),
+          y = c(dvp2001[j], dvp2001[j], dvp2004[j], dvp2006[j], dvp2008[j], dvp2011[j], 
+                dvp2013[j], dvp2016[j], dvp2019[j], dvp2019[j]),
+          xi = year(start)),
+        pct_wetlands = interp1(
+          x = c(1980,2001,2004,2006,2008,2011,2013,2016,2019,2022),
+          y = c(wet2001[j], wet2001[j], wet2004[j], wet2006[j], wet2008[j], wet2011[j], 
+                wet2013[j], wet2016[j], wet2019[j], wet2019[j]),
+          xi = year(start)))
+  }
+
+```
+
+## Percent within floodplain
+
+We use the 100-year floodplain as defined by the FEMA National Flood Hazard Layer (NFHL).
+All floodplain codes starting with an "A" or a "V" are considered to fall in the 100-year floodplain.
+Similar to the land cover features, we then calculated the percentage of each tract's area that was covered by an 100-year floodplain polygon. 
+
+This feature has no temporal variability because tracking changes to the NFHL over time is incredibly challenging with the data available through the FEMA Map Viewer and was determined to be outside the scope of this project. 
+Therefore the only variation is tract-level.
+
+```{r}
+# https://catalog.data.gov/dataset/national-flood-hazard-layer-nfhl
+
+# floodzone <- function(x) {
+#   if (x %in% c('A', 'A99', 'AE', 'AH', 'AO', 'V', 'VE')) {
+#     return('YES')
+#   } else if (x %in% c('D', 'X')) {
+#     return('NO')
+#   } else if (x == 'OPEN WATER') {
+#     return('WATER')
+#   } else {
+#     return(NA)
+#   }
+# }
+# NFHL <-
+#   st_read('_data/NFHL/S_Fld_Haz_Ar.shp', quiet = TRUE) %>%
+#   st_transform(projected) %>%
+#   mutate(FLOODPLAIN = factor(apply(data.frame(FLD_ZONE), 1, floodzone))) %>%
+#   filter(FLOODPLAIN == 'YES') %>%
+#   st_buffer(dist = 0) %>%
+#   select(FLOODPLAIN)
+# 
+# NFHL.poly <- NFHL %>%
+#   st_intersection(polys %>% st_transform(projected)) %>%
+#   mutate(partarea = st_area(.)) %>%
+#   st_drop_geometry %>%
+#   group_by(id) %>%
+#   summarize(partarea = Sum(partarea))
+
+```
+
+```{r}
+## checkpoint
+# save(NFHL, NFHL.poly, file = '_data/_checkpoints/sac_NFHL_0420.Rdata')
+load('_data/_checkpoints/sac_NFHL_0420.Rdata')
+
+```
+
+```{r}
+polys.temp <- polys %>% 
+  st_transform(projected) %>% 
+  mutate(totalarea = toNumber(st_area(.))) %>% 
+  left_join(NFHL.poly, by = 'id') %>% 
+  mutate(pct_floodplain = setNA(partarea/totalarea,0))
+
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% mutate(pct_floodplain = polys.temp$pct_floodplain[j])
+  }
+
+```
+
+# Exposure variables 
+
+## Population
+
+We used population data from both the US Census Bureau's Population Estimates Program (PEP) and the American Community Survey (ACS) 5-year survey.
+PEP estimates of population are available by county and year going back to 1980.
+ACS 5-year estimates are available by tract and year starting in 2009.
+Therefore we estimate tract-level population from 1980-2008 by dividing the county-wide totals based on the tract-level distribution in 2009.
+We then make adjustments to match 2000 and 2010 census tracts to 2020 census tracts, as described above in the Setup section.
+
+The plot below shows the change in population by tract over time as a visual check.
+Because the relationships between counties are assumed to be fixed until 2009, no lines cross or change in relation to each other until after that. 
+There is a good deal of movement from 2009-2010 and 2019-2020, which relates to the inexactness of the translation between census tracts from different census generations. 
+We note that as a limitation of this method.
+
+```{r}
+# https://www2.census.gov/programs-surveys/popest/tables/1980-1990/counties/totals/
+# https://www2.census.gov/programs-surveys/popest/tables/1990-2000/counties/totals/
+# https://www2.census.gov/programs-surveys/popest/tables/2000-2009/counties/totals/
+# https://www2.census.gov/programs-surveys/popest/tables/2010-2019/counties/totals/
+# https://www2.census.gov/programs-surveys/popest/tables/2020-2022/counties/totals/
+
+## get population by county
+pop_county <- rbind(
+  read.csv('_data/ACS/acs1980-1989.csv', header = TRUE)[-1,] %>% 
+    mutate(across(starts_with('X'), ~gsub('\\.','',.) %>% toNumber)) %>% 
+    select(-Code) %>% rename(county = Area.Name) %>% 
+    pivot_longer(-county, names_to = 'year', values_to = 'pop'),
+  read.csv('_data/ACS/acs1990-1999.csv', header = TRUE) %>% 
+    mutate(across(starts_with('X'), ~gsub('\\,','',.) %>% toNumber)) %>% 
+    select(-X2000) %>% 
+    rename(county = County) %>% 
+    pivot_longer(-county, names_to = 'year', values_to = 'pop'),
+  read.csv('_data/ACS/acs2000-2009.csv', header = TRUE) %>% 
+    mutate(across(starts_with('X'), ~gsub('\\,','',.) %>% toNumber)) %>% 
+    select(-X2010) %>% 
+    pivot_longer(-county, names_to = 'year', values_to = 'pop'),
+  read.csv('_data/ACS/acs2010-2019.csv', header = TRUE, skip = 1) %>% 
+    mutate(X = X %>% gsub('\\.', '', .) %>% gsub(' County, California', '', .)) %>% 
+    rename(county = X) %>% 
+    mutate(across(starts_with('X'), ~gsub('\\,','',.) %>% toNumber)) %>% 
+    pivot_longer(-county, names_to = 'year', values_to = 'pop'),
+  read.csv('_data/ACS/acs2020-2022.csv', header = TRUE, skip = 1)[-1,] %>% 
+    mutate(X = X %>% gsub('\\.', '', .) %>% gsub(' County, California', '', .)) %>% 
+    rename(county = X) %>% 
+    mutate(across(starts_with('X'), ~gsub('\\,','',.) %>% toNumber)) %>% 
+    pivot_longer(-county, names_to = 'year', values_to = 'pop')) %>% 
+  mutate(
+    year = toNumber(gsub('X', '', year)),
+    county = gsub(' County', '', county) %>% 
+      gsub('Contra Costa Co', 'Contra Costa', .) %>% str_trim) %>% 
+  left_join(california %>% st_drop_geometry %>% select(COUNTYFP, NAME), by = c('county' = 'NAME'))
+
+```
+
+```{r}
+## get population by tract through 2009
+pop_tract <- 
+  map_dfr(
+    .x = 2009:2021,
+    .f = ~getCensus(
+      name = 'acs/acs5', vintage = .x,
+      vars = 'B01001_001E',
+      regionin = 'state:06+county:005,017,061,067,077', region = 'tract:*') %>% 
+      mutate(year = .x)) %>% 
+  transmute(county, tract, year, pop = B01001_001E)
+
+## evenly divide pre-2009 county-level population into tracts 
+pop_tract <- 
+  expand.grid(
+    GEOID = unique(paste0('06', pop_tract$county, pop_tract$tract)), 
+    year = 1980:2008) %>% 
+  mutate(county = str_sub(GEOID, 3, 5)) %>% 
+  left_join(pop_county %>% select(-county), by = c('year','county' = 'COUNTYFP')) %>% 
+  select(-county) %>% rename(totalpop = pop) %>% 
+  full_join(
+    pop_tract %>% 
+      filter(year == 2009) %>% 
+      group_by(county) %>% 
+      transmute(GEOID = unique(paste0('06', county, tract)), pct = pop/sum(pop)) %>% 
+      ungroup,
+    by = 'GEOID') %>% 
+  mutate(pop = round(totalpop*pct)) %>% 
+  transmute(county = str_sub(GEOID,3,5), tract = str_sub(GEOID,6,11), year, pop) %>% 
+  rbind(pop_tract)
+
+```
+
+```{r}
+## convert old census tracts to match 2021
+pop_tract <-
+  rbind(
+    pop_tract %>%
+      filter(year < 2010) %>%
+      mutate(GEOID00 = toNumber(paste0('06067',tract))) %>%
+      left_join(convert, by = 'GEOID00') %>%
+      group_by(GEOID00, year) %>% mutate(n = length(GEOID00)) %>% ungroup %>%
+      mutate(pop2 = pop/n) %>%
+      group_by(GEOID20, year) %>%
+      summarize(pop = round(sum(pop2))) %>% ungroup %>%
+      select(year, pop, GEOID20),
+    pop_tract %>%
+      filter(year %in% 2010:2019) %>%
+      mutate(GEOID10 = toNumber(paste0('06067',tract))) %>%
+      left_join(convert, by = 'GEOID10') %>%
+      group_by(GEOID10, year) %>% mutate(n = length(GEOID10)) %>% ungroup %>%
+      mutate(pop2 = pop/n) %>%
+      group_by(GEOID20, year) %>%
+      summarize(pop = round(sum(pop2))) %>% ungroup %>%
+      select(year, pop, GEOID20),
+    pop_tract %>%
+      filter(year >= 2020) %>%
+      transmute(year, pop, GEOID20 = toNumber(paste0('06067',tract)))) %>%
+  filter(GEOID20 %in% toNumber(paste0('06067', polys$name)))
+
+## check
+ggplot(pop_tract) + 
+  geom_line(aes(x = year, y = pop, group = GEOID20), alpha = 0.25) + 
+  scale_y_log10() + annotation_logticks(sides = 'l', size = 0.25, color = 'grey25') + 
+  coord_cartesian(ylim = c(NA,3e4)) + 
+  labs(x = 'Year', y = 'Tract-Level Population')
+
+```
+
+```{r}
+pop_tract <- pop_tract %>%
+  left_join(
+    polys %>% st_drop_geometry %>% mutate(GEOID20 = toNumber(paste0('06067',name))), 
+    by = 'GEOID20')
+pop_tract <- 
+  expand.grid(year = unique(pop_tract$year), id = unique(pop_tract$id)) %>% 
+  left_join(pop_tract, by = c('year','id')) %>% 
+  mutate(pop = setNA(pop,0))
+
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>%
+      mutate(year = year(start)) %>% 
+      left_join(pop_tract %>% filter(id == j) %>% select(pop, year), by = 'year') %>% 
+      select(-year) %>% 
+      mutate(
+        logpop = log10(pop+1),
+        logpopdensity = log10((pop/polys$area[j]*1609.344^2)+1)) %>% 
+      select(-pop)
+  }
+
+```
+
+## Housing units
+
+We also used a combination of PEP estimates and ACS 5-year estimates to calculate of the number of housing units by tract extending back to 1980.
+The process is much the same as it was for population, except that housing estimates prior to 2000 are only available at the state level, not the county, and 1999 is missing entirely.
+So the steps are as follows:
+
+* Interpolate statewide number of houses in 1990;
+* Distribute statewide housing units into counties based on the county-level distribution of housing units in 2000;
+* Distribute countywide housing units into tracts based on the tract-level distribution of housing units in 2009; and
+* Translate 2000 and 2010 census tracts to match 2020 census tracts.
+
+The plot below shows the change in housing units by tract over time as a visual check.
+The same comments about the population plot are applicable here as well. 
+
+```{r}
+# https://www2.census.gov/programs-surveys/popest/tables/1990-2000/housing/totals/ (includes 1980-1998)
+# https://www2.census.gov/programs-surveys/popest/tables/2000-2009/housing/totals/
+# https://www2.census.gov/programs-surveys/popest/tables/2010-2019/housing/totals/
+# https://www2.census.gov/programs-surveys/popest/tables/2020-2021/housing/totals/
+
+## get housing units by county through 2000
+hu_county <- 
+  rbind(
+    read.csv('_data/ACS/housing2020-2021.csv') %>% 
+      mutate(across(starts_with('X'), ~gsub(',', '', .) %>% toNumber)) %>% 
+      pivot_longer(cols = -County, names_to = 'year', values_to = 'hu'),
+    read.csv('_data/ACS/housing2010-2019.csv') %>% 
+      mutate(across(starts_with('X'), ~gsub(',', '', .) %>% toNumber)) %>% 
+      pivot_longer(cols = -County, names_to = 'year', values_to = 'hu'),
+    read.csv('_data/ACS/housing2000-2009.csv') %>% 
+      slice(1:58) %>% 
+      setNames(c('County', 2009:2000)) %>% 
+      mutate(County = gsub(' County', '', County)) %>% 
+      mutate(across(-County, ~gsub(',', '', .) %>% toNumber)) %>% 
+      pivot_longer(cols = -County, names_to = 'year', values_to = 'hu')) %>% 
+  mutate(year = gsub('X', '', year) %>% toNumber)
+
+## get housing units by state
+hu_state <-
+  read.csv('_data/ACS/housing1980-1998.csv', header = FALSE) %>% 
+  transmute(year = 1980:1998, hu_state = V2)
+
+```
+
+```{r}
+## interpolate statewide 1999 housing units
+hu_state <- 
+  hu_county %>% 
+  group_by(year) %>% 
+  summarize(hu_state = sum(hu)) %>% 
+  rbind(hu_state)
+hu_state <- hu_state %>% 
+  rbind(data.frame(year = 1999, hu_state = interp1(x = hu_state$year, y = hu_state$hu_state, xi = 1999)))
+
+## interpolate county-level distribution based on 2000
+hu_pct <- hu_county %>% 
+  filter(year == 2000) %>% 
+  mutate(pct = hu/sum(hu)) %>% 
+  select(County, pct)
+hu_county <- 
+  map_dfr(
+    .x = 1980:1999,
+    .f = ~hu_pct %>% 
+      mutate(
+        year = .x,
+        hu_state = hu_state %>% filter(year == .x) %>% pull(hu_state),
+        hu = round(pct*hu_state)) %>% 
+      select(County, year, hu)) %>% 
+  rbind(hu_county)
+
+```
+
+```{r}
+## interpolate tract-level distribution based on 2009
+hu_tract <- 
+  map_dfr(
+    .x = 2009:2021,
+    .f = ~getCensus(
+      name = 'acs/acs5', vintage = .x,
+      vars = 'B25001_001E',
+      regionin = 'state:06+county:067', region = 'tract:*') %>% 
+      mutate(year = .x)) %>% 
+  transmute(tract, year, hu = B25001_001E)
+
+hu_tract <- 
+  expand.grid(
+    tract = hu_tract %>% filter(year == 2009) %>% pull(tract), 
+    year = 1980:2008) %>% 
+  left_join(
+    hu_county %>% filter(County == 'Sacramento') %>% transmute(year, totalhu = hu),
+    by = 'year') %>% 
+  left_join(
+    hu_tract %>% filter(year == 2009) %>% transmute(tract, pct = hu/sum(hu)),
+    by = 'tract') %>% 
+  mutate(hu = round(totalhu*pct)) %>% 
+  select(tract, year, hu) %>% 
+  rbind(hu_tract)
+
+```
+
+```{r}
+## convert old census tracts to match 2021
+hu_tract <- 
+  rbind(
+    hu_tract %>% 
+      filter(year < 2010) %>%
+      mutate(GEOID00 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID00') %>% 
+      group_by(GEOID00, year) %>% mutate(n = length(GEOID00)) %>% ungroup %>% 
+      mutate(hu2 = hu/n) %>% 
+      group_by(GEOID20, year) %>% 
+      summarize(hu = round(sum(hu2))) %>% ungroup %>% 
+      select(year, hu, GEOID20),
+    hu_tract %>% 
+      filter(year %in% 2010:2019) %>%
+      mutate(GEOID10 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID10') %>% 
+      group_by(GEOID10, year) %>% mutate(n = length(GEOID10)) %>% ungroup %>% 
+      mutate(hu2 = hu/n) %>% 
+      group_by(GEOID20, year) %>% 
+      summarize(hu = round(sum(hu2))) %>% ungroup %>% 
+      select(year, hu, GEOID20),
+    hu_tract %>% 
+      filter(year >= 2020) %>% 
+      transmute(year, hu, GEOID20 = toNumber(paste0('06067',tract)))) %>% 
+  filter(GEOID20 %in% toNumber(paste0('06067', polys$name)))
+
+## check 
+ggplot(hu_tract) + 
+  geom_line(aes(x = year, y = hu, group = GEOID20), alpha = 0.25) + 
+  scale_y_log10() + annotation_logticks(sides = 'l', size = 0.25, color = 'grey25') + 
+  labs(x = 'Year', y = 'Tract-Level Housing Units')
+
+```
+
+```{r}
+hu_tract <- hu_tract %>% 
+  left_join(
+    polys %>% st_drop_geometry %>% mutate(GEOID20 = toNumber(paste0('06067',name))), 
+    by = 'GEOID20')
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>%
+      mutate(year = year(start)) %>% 
+      left_join(hu_tract %>% filter(id == j) %>% select(hu, year), by = 'year') %>% 
+      select(-year) %>% 
+      mutate(loghu = log10(hu)) %>% select(-hu)
+  }
+
+```
+
+## Floodplain exposure
+
+To calculate the percentage of population and housing units in the floodplain by tract, we assumed that population and housing units were evenly distributed in space at the block group level; i.e., if 40% of a block group was covered by the NFHL 100-year floodplain polygons defined earlier, then 40% of that block group's population and 40% of its housing units were said to fall in the floodplain.
+We used block group-level population and housing estimates from the 2021 vintage of the American Community Survey (ACS) 5-year survey. 
+
+```{r}
+## find out the percentage of each block group within the floodplain
+# (assuming population/housing units are distributed evenly throughout block groups)
+
+# bg <- block_groups(state = 'CA', year = 2020) %>% 
+#   st_transform(projected) %>% 
+#   mutate(area = toNumber(st_area(.))) %>% 
+#   st_transform(st_crs(NFHL))
+# overlap <- st_intersects(bg, NFHL)
+# 
+# pb <- txtProgressBar(min = 0, max = length(overlap), style = 3)
+# cl <- makeCluster(cores)
+# registerDoSNOW(cl)
+# bg$partarea <- 
+#   foreach (
+#     i = 1:length(overlap), 
+#     .combine = 'c',
+#     .packages = c('sf', 'tidyverse'),
+#     .export = 'toNumber',
+#     .options.snow = opts) %dopar% {
+#       if (length(overlap[[i]]) == 0) 0 else {
+#         bg[i,] %>% st_intersection(NFHL %>% slice(overlap[[i]])) %>% st_area %>% toNumber %>% sum
+#       }
+#     }
+# stopCluster(cl)
+# pb <- txtProgressBar(min = 0, max = nrow(polys), style = 3)
+
+```
+
+```{r}
+# ## attach block group-level population
+# pop_bg <- 
+#   map_dfr(
+#     .x = california$COUNTYFP,
+#     .f = ~getCensus(
+#       name = 'acs/acs5', 
+#       vintage = 2021,            
+#       vars = 'B01001_001E',     
+#       regionin = paste0('state:06+county:', .x),   
+#       region = 'block group:*'))
+# bg <- pop_bg %>% 
+#   transmute(GEOID = str_c(state,county,tract,block_group), pop = B01001_001E) %>% 
+#   left_join(bg, ., by = 'GEOID')
+# 
+# ## attach block group-level housing units
+# hu_bg <- 
+#   map_dfr(
+#     .x = california$COUNTYFP,
+#     .f = ~getCensus(
+#       name = 'acs/acs5', 
+#       vintage = 2021,            
+#       vars = 'B25001_001E',     
+#       regionin = paste0('state:06+county:', .x),   
+#       region = 'block group:*'))
+# bg <- hu_bg %>% 
+#   transmute(GEOID = str_c(state,county,tract,block_group), hu = B25001_001E) %>% 
+#   left_join(bg, ., by = 'GEOID')
+
+```
+
+```{r}
+## checkpoint
+# save(bg, file = '_data/_checkpoints/bg_0417.Rdata')
+load('_data/_checkpoints/bg_0417.Rdata')
+
+```
+
+```{r}
+polys.temp <- bg %>% 
+  st_drop_geometry %>% 
+  filter(COUNTYFP == '067') %>% 
+  group_by(TRACTCE) %>% 
+  summarize(
+    pop_pct = sum(pop*partarea)/sum(pop*area),
+    hu_pct = sum(hu*partarea)/sum(hu*area)) %>% 
+  left_join(polys %>% st_drop_geometry, by = c('TRACTCE' = 'name'))
+
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(
+        pop_pct_floodplain = polys.temp$pop_pct[j],
+        hu_pct_floodplain = polys.temp$hu_pct[j])
+  }
+
+```
+
+## River indicator
+
+```{r}
+# https://data.cnra.ca.gov/dataset/national-hydrography-dataset-nhd
+rivers <- st_read('_data/NHD_Major_Rivers.gdb', layer = 'Major_Rivers')
+temp <- california %>% 
+  filter(NAME == 'Sacramento') %>% 
+  st_transform(projected) %>% st_buffer(100) %>% 
+  st_transform(st_crs(rivers))
+rivers <- rivers[temp,]
+river.id <- rivers %>% st_zm %>% 
+  st_transform(projected) %>% st_buffer(25) %>% 
+  st_transform(st_crs(polys)) %>% 
+  polys[.,] %>% pull(id)
+polys <- polys %>% mutate(riverine = id %in% river.id)
+
+# mapview(polys, zcol = 'riverine') + mapview(rivers, zcol = 'gnis_name')
+
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% mutate(riverine = polys$riverine[j])
+  }
+polys <- polys %>% select(-riverine)
+
+```
+
+
+# Vulnerability variables
+
+## Social vulnerability 
+
+### CDC Social Vulnerability Index (SVI)
+
+The CDC has released six generations of the SVI: 2000, 2010, 2014, 2016, 2018, and 2020.
+We downloaded tract-level data for all six generations for each of the four dimensions of SVI: (1) socioeconomic status, (2) household characteristics, (3) racial & ethnic minority status, and (4) housing type & transportation.
+Prior to 2000, we assume that all values are constant at 2000 levels, so there is no temporal variation.
+From 2000 to 2020, temporal variation comes from interpolating values between each data generation.
+All values for 2020 and after are constant at 2020 values. 
+
+The plot below shows the change in CDC SVI by tract over time as a visual check.
+The values seem to change much more quickly starting in 2016, which may be because the interval between measurements is much shorter towards the end of the time period.
+
+```{r}
+# https://www.atsdr.cdc.gov/placeandhealth/svi/data_documentation_download.html
+  # Socioeconomic Status – RPL_THEME1
+  # Household Characteristics – RPL_THEME2
+  # Racial & Ethnic Minority Status – RPL_THEME3
+  # Housing Type & Transportation – RPL_THEME4
+
+cdc_svi <- 
+  map_dfr(
+    .x = c(2020, 2018, 2016, 2014),
+    .f = ~paste0('_data/CDCSVI/cdc-svi-', .x, '.csv') %>% 
+      read.csv %>% 
+      select(COUNTY, FIPS, contains('RPL_THEME')) %>% 
+      setNames(c('county', 'fips', paste0('cdc_theme', 1:4), 'cdc_svi')) %>% 
+      mutate(year = .x)
+  ) %>% 
+  rbind(
+    read.csv('_data/CDCSVI/cdc-svi-2010.csv') %>% 
+      select(COUNTY, FIPS, contains('R_PL_THEME')) %>% 
+      setNames(c('county', 'fips', paste0('cdc_theme', 1:4), 'cdc_svi')) %>% 
+      mutate(year = 2010),
+    read.csv('_data/CDCSVI/cdc-svi-2000.csv') %>% 
+      select(-ends_with('F')) %>% 
+      select(COUNTY, TRACT, (starts_with('CA') & ends_with('TP'))) %>% 
+      setNames(c('county', 'fips', paste0('cdc_theme', 1:4), 'cdc_svi')) %>% 
+      mutate(year = 2000))
+
+```
+
+```{r}
+cdc_svi <- cdc_svi %>% 
+  filter(grepl('Sacramento', county)) %>% 
+  mutate(tract = (fips %% 6067000000) %>% str_pad(6, 'left', '0'))
+
+## convert old census tracts to match 2021
+cdc_svi <- 
+  rbind(
+    cdc_svi %>% 
+      filter(year < 2010) %>%
+      mutate(GEOID00 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID00') %>% 
+      group_by(GEOID20, year) %>% 
+      summarize(across(starts_with('cdc'), mean)) %>% 
+      ungroup,
+    cdc_svi %>% 
+      filter(year %in% 2010:2019) %>%
+      mutate(GEOID10 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID10') %>% 
+      group_by(GEOID20, year) %>% 
+      summarize(across(starts_with('cdc'), mean)) %>% 
+      ungroup,
+    cdc_svi %>% 
+      filter(year >= 2020) %>% 
+      rename(GEOID20 = fips) %>% 
+      select(GEOID20, year, starts_with('cdc'))) %>% 
+  filter(GEOID20 %in% toNumber(paste0('06067', polys$name)))
+
+## interpolate missing years
+cdc_svi <-
+  expand.grid(year = 2000:2020, tract = polys$name) %>% 
+  mutate(GEOID20 = toNumber(paste0('06067', tract))) %>% 
+  left_join(polys %>% st_drop_geometry, by = c('tract' = 'name')) %>% 
+  left_join(cdc_svi, by = c('year','GEOID20')) %>% 
+  group_by(GEOID20) %>% 
+  mutate(
+    cdc_theme1 = case_when(is.na(cdc_theme1) ~ interp1(x = year, y = cdc_theme1, xi = year), TRUE ~ cdc_theme1),
+    cdc_theme2 = case_when(is.na(cdc_theme2) ~ interp1(x = year, y = cdc_theme2, xi = year), TRUE ~ cdc_theme2),
+    cdc_theme3 = case_when(is.na(cdc_theme3) ~ interp1(x = year, y = cdc_theme3, xi = year), TRUE ~ cdc_theme3),
+    cdc_theme4 = case_when(is.na(cdc_theme4) ~ interp1(x = year, y = cdc_theme4, xi = year), TRUE ~ cdc_theme4),
+    id = id[year == 2000]) %>% 
+  ungroup %>% 
+  select(-cdc_svi, -area)
+
+cdc_svi %>% 
+  rbind(cdc_svi %>% filter(year == 2000) %>% mutate(year = 1980)) %>% 
+  rbind(cdc_svi %>% filter(year == 2020) %>% mutate(year = 2022)) %>% 
+  select(-id, -GEOID20) %>% 
+  pivot_longer(c(-year, -tract)) %>% 
+  ggplot() + 
+  geom_line(aes(x = year, y = value, group = tract), alpha = 0.1) + 
+  facet_wrap(~name) +
+  scale_y_origin() + 
+  labs(x = 'Year', y = 'CDC SVI') + 
+  theme(strip.background = element_rect(color = NA, fill = 'grey95'))
+
+```
+
+```{r}
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(
+        cdc_year = case_when(
+          year(start) %in% 1980:2000 ~ 2000, 
+          year(start) %in% 2020:2022 ~ 2020, 
+          TRUE ~ year(start))) %>% 
+      left_join(
+        cdc_svi %>% filter(id == j) %>% select(year, starts_with('cdc')), 
+        by = c('cdc_year' = 'year')) %>% 
+      select(-cdc_year)
+  }
+
+```
+
+### CalEnviroScreen
+
+CalEnviroScreen, while specifically created for California, is a newer product than the CDC SVI and thus does not publish multiple data generations.
+Therefore the values are constant over time.
+We downloaded tract-level estimates of the two CalEnviroScreen dimensions, the Pollution Burden Score and the Population Characteristics Score, and added them to events by tract.
+
+```{r}
+calenviro <- 
+  st_read('_data/CalEnviroScreen/CES4 Final Shapefile.shp') %>%
+  st_transform(st_crs(polys)) %>% 
+  select(Tract, County, CIscore, PolBurdSc, PopCharSc) %>% 
+  st_drop_geometry %>% 
+  filter(County == 'Sacramento')
+calenviro <- calenviro %>% 
+  left_join(convert, by = c('Tract' = 'GEOID10')) %>% 
+  group_by(GEOID20) %>% 
+  summarize(across(c(PolBurdSc, PopCharSc), function(x) mean(x[x>=0]))) %>% 
+  filter(GEOID20 %in% toNumber(paste0('06067', polys$name))) %>% 
+  mutate(tract = (GEOID20 %% 6067000000) %>% str_pad(6, 'left', '0')) %>%
+  left_join(polys %>% st_drop_geometry, by = c('tract' = 'name'))
+
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(
+        cal_polburd = calenviro %>% filter(id == j) %>% pull(PolBurdSc), 
+        cal_popchar = calenviro %>% filter(id == j) %>% pull(PopCharSc))
+  }
+
+```
+
+### Disadvantaged communities
+
+In 2012, Senate Bill (SB) 535 in California directed CalEPA to identify disadvantaged communities for the purpose of investing the proceeds from the state's cap-and-trade program.
+SB 535 disadvantaged communities are defined as the 25% highest scoring census tracts in CalEnviroScreen 4.0, census tracts previously identified in the top 25% in CalEnviroScreen 3.0, census tracts with high amounts of pollution and low populations, and federally recognized tribal areasas identified by the Census in the 2021 American Indian Areas Related National Geodatabase. 
+More information on SB 535 and disadvantaged communities can be found here: https://oehha.ca.gov/calenviroscreen/sb535.
+
+The disadvantaged communities map is a binary yes/no map at the tract level.
+Therefore the variable in the tract-level dataset is a binary variable.
+Like CalEnviroScreen, there is no temporal variation associated with this variable.
+
+```{r}
+dac <- 
+  st_read('_data/CalEnviroScreen/i16_Census_Tract_DisadvantagedCommunities_2020.shp')
+dac <- dac %>% 
+  st_drop_geometry %>% 
+  filter(COUNTYFP20 == '067') %>% 
+  mutate(dac = as.numeric(DAC20=='Y')) %>% 
+  group_by(TRACTCE20) %>%
+  summarize(pct_dac = sum(Pop20*dac)/sum(Pop20)) %>% 
+  left_join(polys %>% st_drop_geometry %>% select(name,id), by = c('TRACTCE20' = 'name')) %>% 
+  arrange(id)
+  
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% mutate(pct_dac = dac$pct_dac[j])
+  }
+
+```
+
+### Median household income
+
+Median household income is available at the county level from the American Community Survey (ACS) 5-year survey from 2009 to 2021.
+Prior to that, it is available at the county level in 1969, 1979, 1989, and 1999 through the US Census Bureau decadal census. 
+We interpolated county-level values for missing years and inflation-adjusted all values to be in 2022 dollars.
+We then estimated tract-level median household income prior to 2009 based on the tract-to-county ratio; i.e., if the tract-level median income was 1.4x the county median income in 2009, we assumed it was 1.4x the county median income for every year prior to 2009.
+Lastly, we translated 2000 and 2010 census tracts to match 2020 census tracts.
+
+The plot below shows the change in median income by tract over time as a visual check.
+Household median income seems to have more annual variation than either population or housing units; there is also a large jump from 2009 to 2010, which could be due to the data processing techniques or due to a continued recovery from the 2008 market crash.
+
+```{r}
+## download data
+# 1969-1999: https://www.census.gov/data/tables/time-series/dec/historical-income-counties.html
+
+## get county-level median household income
+income_county <- 
+  read.csv('_data/ACS/income1969-1999.csv', skip = 8, header = FALSE) %>% 
+  filter(grepl(', CA', V1)) %>% 
+  setNames(c('county', '1999', '1989', '1979', '1969')) %>% 
+  .[,1:5] %>% 
+  mutate(county = gsub(' County, CA', '', county)) %>% 
+  mutate(across(-county, ~gsub(',', '', .) %>% toNumber)) %>% 
+  pivot_longer(-county, names_to = 'year', values_to = 'hhincome') %>% 
+  mutate(inflation_year = 1989) %>% 
+  rbind(
+    map_dfr(
+      .x = 2009:2021,
+      .f = ~getCensus(
+        name = 'acs/acs5', vars = 'B19013_001E', vintage = .x,
+        regionin = 'state:06', region = 'county:*') %>%
+        left_join(
+          california %>% st_drop_geometry %>% select(COUNTYFP, NAME), 
+          by = c('county' = 'COUNTYFP')) %>%
+        transmute(
+          county = NAME, hhincome = B19013_001E, 
+          year = .x, inflation_year = .x))) %>% 
+  mutate(year = toNumber(year))
+
+## adjust for inflation
+income_county <- income_county %>% left_join(inflation.df, by = c('inflation_year' = 'year'))
+
+## interpolate missing years
+income_county <- income_county %>% 
+  mutate(hhincome22 = hhincome*adj_factor, inflation_year = 2022) %>% 
+  full_join(expand.grid(county = california$NAME, year = 1979:2021)) %>% 
+  group_by(county) %>% 
+  mutate(
+    hhincome22 = ifelse(is.na(hhincome22), interp1(year, hhincome22, xi = year), hhincome22),
+    inflation_year = 2022) %>% 
+  arrange(year) %>% arrange(county)
+
+```
+
+```{r}
+## interpolate pre-2009 based on tract:county ratio 
+income_county <- income_county %>% filter(county == 'Sacramento') %>% ungroup
+income_tract_post <- 
+  map_dfr(
+  .x = 2009:2021,
+  .f = ~getCensus(
+    name = 'acs/acs5', vars = 'B19013_001E', vintage = .x,
+    regionin = 'state:06+county:067', region = 'tract:*') %>%
+    mutate(year = .x, inflation_year = .x)) 
+income_tract_post <- income_tract_post %>%
+  transmute(tract, year, inflation_year, hhincome = B19013_001E) %>%
+  mutate(hhincome = ifelse(hhincome<0, NA, hhincome)) %>% 
+  left_join(inflation.df, by = c('inflation_year' = 'year')) %>% 
+  mutate(hhincome22 = hhincome*adj_factor, inflation_year = 2022)
+
+income_tract_pre <- 
+  expand.grid(
+    year = 1980:2008, 
+    tract = income_tract_post %>% filter(year == 2009) %>% pull(tract)) %>% 
+  left_join(income_county %>% transmute(hhcounty22 = hhincome22, year), by = 'year') %>% 
+  left_join(
+    income_tract_post %>% 
+      filter(year == 2009) %>% 
+      left_join(income_county %>% transmute(hhcounty22 = hhincome22, year), by = 'year') %>%
+      mutate(ratio = hhincome22/hhcounty22) %>% 
+      select(tract, ratio),
+    by = 'tract') %>% 
+  mutate(hhincome22 = hhcounty22 * ratio)
+
+income_tract <-
+  rbind(
+    income_tract_pre %>% select(tract, year, hhincome22), 
+    income_tract_post %>% select(tract, year, hhincome22))
+
+```
+
+```{r}
+## convert old census tracts to match 2021
+income_tract <- 
+  rbind(
+    income_tract %>% 
+      filter(year < 2010) %>%
+      mutate(GEOID00 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID00') %>% 
+      group_by(GEOID20, year) %>% summarize(hhincome22 = Mean(hhincome22)) %>% ungroup,
+    income_tract %>% 
+      filter(year %in% 2010:2019) %>%
+      mutate(GEOID10 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID10') %>% 
+      group_by(GEOID20, year) %>% summarize(hhincome22 = Mean(hhincome22)) %>% ungroup,
+    income_tract %>% 
+      filter(year >= 2020) %>% 
+      transmute(GEOID20 = toNumber(paste0('06067',tract)), year, hhincome22)) %>% 
+  filter(GEOID20 %in% toNumber(paste0('06067', polys$name)))
+
+## set all NA values to county-level median
+income_tract <- income_tract %>% 
+  left_join(income_county %>% transmute(year, hhcounty22 = hhincome22), by = 'year') %>% 
+  mutate(hhincome22 = ifelse(is.na(hhincome22), hhcounty22, hhincome22))
+
+## check
+ggplot(income_tract %>% filter(year >= 1980)) + 
+  geom_line(aes(x = year, y = hhincome22, group = GEOID20), alpha = 0.25) + 
+  scale_y_origin(labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) + 
+  labs(x = 'Year', y = 'Median Tract Income (2022 Dollars)')
+
+```
+
+```{r}
+income_tract <- income_tract %>% 
+  left_join(
+    polys %>% st_drop_geometry %>% mutate(GEOID20 = toNumber(paste0('06067',name))), 
+    by = 'GEOID20')
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(year = year(start)) %>% 
+      left_join(
+        income_tract %>% filter(id == j) %>% transmute(year, hhincome22), 
+        by = 'year') %>% 
+      select(-year)
+  }
+
+```
+
+### Percent non-Hispanic white
+
+```{r}
+## download county-level data
+
+## download 2009-2021 
+acs_vars <- listCensusMetadata(name = 'acs/acs5', vintage = 2021)
+white_nonhisp <- map_dfr(
+  .x = 2009:2021,
+  .f = ~getCensus(
+    name = 'acs/acs5', 
+    vars = 'group(B03002)', vintage = .x,
+    regionin = 'state:06', region = 'county:*') %>% 
+    select(county, ends_with('E')) %>% select(-state, -NAME) %>%
+    pivot_longer(-county) %>% 
+    left_join(acs_vars %>% select(name, label), by = 'name') %>% 
+    select(-label) %>% 
+    filter(name %in% c('B03002_001E', 'B03002_003E')) %>% 
+    pivot_wider(names_from = name, values_from = value) %>% 
+    setNames(c('county', 'total', 'white_nonhisp')) %>% 
+    mutate(pct_white_nonhisp = white_nonhisp/total, year = .x)
+  ) %>% 
+  transmute(GEOID = paste0('06',county), year, pct_white_nonhisp)
+
+## download 2000-2008 data
+# https://www.census.gov/data/datasets/time-series/demo/popest/intercensal-2000-2010-counties.html
+
+race_00s <- read.csv('_data/ACS/asrh/co-est00int-sexracehisp.csv') %>% 
+  filter(STNAME == 'California') %>% 
+  mutate(
+    ORIGIN = case_match(ORIGIN, 0 ~ 'total', 1 ~ 'nonhisp', 2 ~ 'hisp'),
+    RACE = case_match(RACE, 0 ~ 'total', 1 ~ 'white', 2:6 ~ 'nonwhite')) %>% 
+  filter(SEX == 0)
+white_nonhisp <- 
+  race_00s %>% 
+  filter((ORIGIN=='total' & RACE=='total') | (ORIGIN=='nonhisp' & RACE=='white')) %>% 
+  select(COUNTY, ORIGIN, RACE, starts_with('POPEST')) %>% 
+  pivot_longer(starts_with('POPEST'), names_to = 'year', values_to = 'pop') %>% 
+  mutate(year = toNumber(gsub('POPESTIMATE', '', year))) %>% 
+  mutate(race_eth = paste(RACE, ORIGIN, sep = '_')) %>% 
+  select(-RACE, -ORIGIN) %>% 
+  pivot_wider(names_from = race_eth, values_from = pop) %>% 
+  mutate(pct_white_nonhisp = white_nonhisp/total_total) %>% 
+  filter(year < 2009) %>% 
+  transmute(
+    GEOID = str_pad(6000+COUNTY, 5, side = 'left', pad = '0'), 
+    year, pct_white_nonhisp) %>% 
+  rbind(white_nonhisp)
+
+## download 1990-1999 data
+# https://www2.census.gov/programs-surveys/popest/datasets/1990-2000/counties/asrh/
+
+race_90s <- read.table('_data/ACS/asrh/CO-99-10.txt', skip = 17) %>% 
+  data.frame %>%
+  setNames(c('year','fips','white-nonhisp','black-nonhisp','ak-nonhisp','pi-nonhisp','white-hisp','black-hisp','ak-hisp','pi-hisp')) %>% 
+  filter(fips %in% toNumber(california$GEOID)) %>% 
+  pivot_longer(c(-year,-fips), values_to = 'pop') %>% 
+  separate(name, into = c('race','ethnicity'), sep = '-') 
+white_nonhisp <- 
+  race_90s %>% 
+  group_by(year, fips) %>% 
+  mutate(pct_white_nonhisp = pop/sum(pop)) %>% ungroup %>% 
+  filter(race == 'white' & ethnicity == 'nonhisp') %>% 
+  transmute(GEOID = str_pad(fips, 5, 'left', '0'), year, pct_white_nonhisp) %>% 
+  rbind(white_nonhisp)
+
+## download 1980-1989 data
+# https://www2.census.gov/programs-surveys/popest/datasets/1980-1990/counties/asrh/
+# contains race data only (no ethnicity) -> apply correction factor
+
+asrh80s <- 
+  map_dfr(
+    .x = paste(1980:1989),
+    .f = ~read_xls('_data/ACS/asrh/pe-02.xls', sheet = .x, skip = 5)[-1,] %>% 
+      rename(year = `Year of Estimate`, GEOID = `FIPS State and County Codes`) %>% 
+      filter(GEOID %in% california$GEOID) %>% 
+      mutate(`Race/Sex Indicator` = gsub('races ','',`Race/Sex Indicator`)) %>% 
+      separate(`Race/Sex Indicator`, into = c('race','sex'), sep = ' ') %>% 
+      pivot_longer(-(1:4), names_to = 'age', values_to = 'pop'))
+
+## find ratio between Hispanic & non-Hispanic white in 1990 to calculate 1980s correction factor
+ratio_nonhisp <- race_90s %>% 
+  filter(race == 'white' & year == 1990) %>% 
+  group_by(year, fips) %>% 
+  mutate(ratio_nonhisp = pop/sum(pop)) %>% ungroup %>% 
+  filter(ethnicity == 'nonhisp') %>% 
+  transmute(GEOID = str_pad(fips, 5, 'left', '0'), ratio_nonhisp)
+white_nonhisp <- 
+  asrh80s %>% 
+  group_by(year,GEOID,race) %>% 
+  summarize(pop = sum(pop)) %>% 
+  mutate(pct_white = pop/sum(pop)) %>% 
+  ungroup %>%
+  filter(race == 'White') %>% 
+  left_join(ratio_nonhisp, by = 'GEOID') %>% 
+  transmute(GEOID, year, pct_white_nonhisp = pct_white*ratio_nonhisp) %>% 
+  rbind(white_nonhisp)
+  
+```
+
+```{r}
+## interpolate pre-2009 based on tract:county ratio 
+
+white_nonhisp_county <- white_nonhisp %>% filter(GEOID == '06067')
+
+## download 2009-2021 tract-level data 
+white_nonhisp_tract_post <- map_dfr(
+  .x = 2009:2021,
+  .f = ~getCensus(
+    name = 'acs/acs5', 
+    vars = 'group(B03002)', vintage = .x,
+    regionin = 'state:06+county:067', region = 'tract:*') %>% 
+    select(tract, ends_with('E')) %>% select(-state, -NAME) %>%
+    pivot_longer(-tract) %>% 
+    left_join(acs_vars %>% select(name, label), by = 'name') %>% 
+    select(-label) %>% 
+    filter(name %in% c('B03002_001E', 'B03002_003E')) %>% 
+    pivot_wider(names_from = name, values_from = value) %>% 
+    setNames(c('tract', 'total', 'white_nonhisp')) %>% 
+    mutate(pct_white_nonhisp = white_nonhisp/total, year = .x) %>% 
+    select(tract, year, pct_white_nonhisp)
+  )
+
+white_nonhisp_tract_pre <-
+  expand.grid(
+    year = 1980:2008,
+    tract = white_nonhisp_tract_post %>% filter(year == 2009) %>% pull(tract)) %>% 
+  left_join(
+    white_nonhisp_county %>% transmute(pct_county = pct_white_nonhisp, year),
+    by = 'year') %>% 
+  left_join(
+    white_nonhisp_tract_post %>% 
+      filter(year == 2009) %>% 
+      left_join(
+        white_nonhisp_county %>% transmute(pct_county = pct_white_nonhisp, year),
+        by = 'year') %>% 
+      mutate(ratio = pct_white_nonhisp/pct_county) %>% 
+      select(tract, ratio),
+    by = 'tract') %>% 
+    mutate(
+      pct_white_nonhisp = (pct_county*ratio) %>% 
+        cbind(1) %>% apply(1,min) %>% cbind(0) %>% apply(1,max))
+
+white_nonhisp_tract <-
+  rbind(
+    white_nonhisp_tract_pre %>% select(tract, year, pct_white_nonhisp), 
+    white_nonhisp_tract_post %>% select(tract, year, pct_white_nonhisp))
+
+```
+
+```{r}
+## convert old census tracts to match 2021
+white_nonhisp_tract <- 
+  rbind(
+    white_nonhisp_tract %>% 
+      filter(year < 2010) %>%
+      mutate(GEOID00 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID00') %>% 
+      group_by(GEOID20, year) %>% 
+      summarize(pct_white_nonhisp = Mean(pct_white_nonhisp)) %>% ungroup,
+    white_nonhisp_tract %>% 
+      filter(year %in% 2010:2019) %>%
+      mutate(GEOID10 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID10') %>% 
+      group_by(GEOID20, year) %>% 
+      summarize(pct_white_nonhisp = Mean(pct_white_nonhisp)) %>% ungroup,
+    white_nonhisp_tract %>% 
+      filter(year >= 2020) %>% 
+      transmute(GEOID20 = toNumber(paste0('06067',tract)), year, pct_white_nonhisp)) %>% 
+  filter(GEOID20 %in% toNumber(paste0('06067', polys$name)))
+
+## check
+ggplot(white_nonhisp_tract) + 
+  geom_line(aes(x = year, y = pct_white_nonhisp, group = GEOID20), alpha = 0.25) + 
+  labs(x = 'Year', y = 'Percent of Population as Non-Hispanic White') + 
+  scale_y_origin(labels = percent) + coord_cartesian(ylim = c(0,1))
+
+```
+
+```{r}
+white_nonhisp_tract <- white_nonhisp_tract %>% 
+  left_join(
+    polys %>% st_drop_geometry %>% mutate(GEOID20 = toNumber(paste0('06067',name))), 
+    by = 'GEOID20')
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(year = year(start)) %>% 
+      left_join(
+        white_nonhisp_tract %>% filter(id == j) %>% transmute(year, pct_white_nonhisp), 
+        by = 'year') %>% 
+      select(-year)
+  }
+
+```
+
+### Percent working age (18-64)
+
+```{r}
+## download county-level data
+
+## download 2009-2021
+profile_vars <- listCensusMetadata(name = 'acs/acs5/profile', vintage = 2021)
+working <- map_dfr(
+  .x = 2009:2021,
+  .f = ~getCensus(
+    name = 'acs/acs5/profile', 
+    vars = 'group(DP05)', vintage = .x,
+    regionin = 'state:06', region = 'county:*') %>% 
+    select(state, county, ends_with('E')) %>% select(-NAME) %>% 
+    select(-ends_with('PE')) %>% 
+    pivot_longer(starts_with('DP')) %>% 
+    left_join(
+      listCensusMetadata(name = 'acs/acs5/profile', vintage = .x) %>% 
+        select(name,label), 
+      by = 'name') %>% 
+    filter(grepl('SEX AND AGE', label)) %>% 
+    filter(!grepl('Male', label) & !grepl('Female',label) & !grepl('Sex ratio',label)) %>% 
+    mutate(
+      lab = str_split(label, 'SEX AND AGE!!') %>% 
+        lapply(function(x) x[2]) %>% reduce(c)) %>% 
+    mutate(
+      title = case_when(
+        lab == 'Total population' ~ 'total',
+        grepl('18 years and over', lab) ~ 'over18',
+        grepl('65 years and over', lab) ~ 'over65')) %>% 
+    filter(!is.na(title)) %>% 
+    group_by(county, title) %>% 
+    summarize(value = value[1], .groups = 'drop') %>%
+    pivot_wider(names_from = title, values_from = value) %>% 
+    mutate(working = over18-over65, pct_working = working/total, year = .x)
+  ) %>% 
+  transmute(GEOID = paste0('06',county), year, pct_working)
+
+
+## download 2000-2008 data
+# https://www.census.gov/data/datasets/time-series/demo/popest/intercensal-2000-2010-counties.html
+
+age00s <- 
+  read.csv('_data/ACS/asrh/co-est00int-agesex-5yr.csv') %>% 
+  filter(STNAME == 'California' & SEX == 0) %>%
+  mutate(
+    AGEGRP = case_match(
+      AGEGRP, 
+      0 ~ 'Total',
+      1 ~ 'Age 0 to 4 years',
+      2 ~ 'Age 5 to 9 years',
+      3 ~ 'Age 10 to 14 years',
+      4 ~ 'Age 15 to 19 years',
+      5 ~ 'Age 20 to 24 years',
+      6 ~ 'Age 25 to 29 years',
+      7 ~ 'Age 30 to 34 years',
+      8 ~ 'Age 35 to 39 years',
+      9 ~ 'Age 40 to 44 years',
+      10 ~ 'Age 45 to 49 years',
+      11 ~ 'Age 50 to 54 years',
+      12 ~ 'Age 55 to 59 years',
+      13 ~ 'Age 60 to 64 years',
+      14 ~ 'Age 65 to 69 years',
+      15 ~ 'Age 70 to 74 years',
+      16 ~ 'Age 75 to 79 years',
+      17 ~ 'Age 80 to 84 years',
+      18 ~ 'Age 85 years and older'))
+working <- age00s %>% 
+  filter(AGEGRP != 'Total') %>% 
+  select(COUNTY, AGEGRP, starts_with('POPEST')) %>% 
+  pivot_longer(starts_with('POPEST'), names_to = 'year', values_to = 'pop') %>% 
+  mutate(year = toNumber(gsub('POPESTIMATE', '', year))) %>% 
+  mutate(
+    age = case_when(
+      AGEGRP == 'Under 5 years' ~ '0 to 5 years', 
+      AGEGRP == '85 years and over' ~ '85 to 100 years',
+      TRUE ~ AGEGRP)) %>% 
+  separate(age, into = c(NA, 'agemin', NA, 'agemax', NA)) %>% 
+  mutate(
+    pop_adj = case_when(
+      agemin == '15' ~ round(pop*2/5),
+      agemin %in% paste(seq(20,60,5)) ~ pop, 
+      TRUE ~ 0)) %>% 
+  group_by(COUNTY, year) %>% 
+  summarize(pop = sum(pop), pop_adj = sum(pop_adj)) %>% 
+  ungroup %>% 
+  mutate(pct_working = pop_adj/pop) %>% 
+  transmute(GEOID = str_pad(6000+COUNTY, 5, 'left', '0'), year, pct_working) %>% 
+  filter(year < 2009) %>% 
+  rbind(working)
+
+
+## download 1990-1999 data
+# https://www2.census.gov/programs-surveys/popest/tables/1990-2000/intercensal/st-co/
+# documentation: https://www2.census.gov/programs-surveys/popest/technical-documentation/file-layouts/1990-2000/stch-intercensal_layout.txt
+
+age90s <- map_dfr(
+  .x = 1990:1999,
+  .f = ~paste0('_data/ACS/asrh/stch-icen', .x, '.txt') %>% 
+    read.table %>% 
+    setNames(c('YEAR','COUNTY','AGEGRP','RACE','ORIGIN','POP')) %>% 
+    mutate(COUNTY = str_pad(COUNTY, 5, 'left', '0')) %>% 
+    filter(str_starts(COUNTY, '06')) %>% 
+    group_by(YEAR, COUNTY, AGEGRP) %>% 
+    summarize(POP = sum(POP), .groups = 'drop') %>% 
+    mutate(
+      AGEGRP = case_match(
+        AGEGRP, 
+        0 ~ 'Total',
+        1 ~ 'Age 0 to 4 years',
+        2 ~ 'Age 5 to 9 years',
+        3 ~ 'Age 10 to 14 years',
+        4 ~ 'Age 15 to 19 years',
+        5 ~ 'Age 20 to 24 years',
+        6 ~ 'Age 25 to 29 years',
+        7 ~ 'Age 30 to 34 years',
+        8 ~ 'Age 35 to 39 years',
+        9 ~ 'Age 40 to 44 years',
+        10 ~ 'Age 45 to 49 years',
+        11 ~ 'Age 50 to 54 years',
+        12 ~ 'Age 55 to 59 years',
+        13 ~ 'Age 60 to 64 years',
+        14 ~ 'Age 65 to 69 years',
+        15 ~ 'Age 70 to 74 years',
+        16 ~ 'Age 75 to 79 years',
+        17 ~ 'Age 80 to 84 years',
+        18 ~ 'Age 85 years and older')) %>% 
+    mutate(
+      age = case_when(
+        AGEGRP == 'Under 5 years' ~ '0 to 5 years', 
+        AGEGRP == '85 years and over' ~ '85 to 100 years',
+        TRUE ~ AGEGRP)) %>% 
+    separate(age, into = c(NA, 'agemin', NA, 'agemax', NA), fill = 'right') %>% 
+    mutate(
+      pop_adj = case_when(
+        agemin == '15' ~ round(POP*2/5),
+        agemin %in% paste(seq(20,60,5)) ~ POP, 
+        TRUE ~ 0)) %>% 
+    group_by(COUNTY, YEAR) %>% 
+    summarize(pop = sum(POP), pop_adj = sum(pop_adj), .groups = 'drop') %>% 
+    mutate(pct_working = pop_adj/pop) %>% 
+    transmute(GEOID = COUNTY, year = YEAR+1900, pct_working)
+  )
+working <- rbind(working, age90s)
+
+## download 1980-1989 data (same source as above)
+
+working <- asrh80s %>% 
+  mutate(
+    age = case_when(
+      age == 'Under 5 years' ~ '0 to 5 years', 
+      age == '85 years and over' ~ '85 to 100 years',
+      TRUE ~ age)) %>% 
+  separate(age, into = c('agemin', NA, 'agemax', NA)) %>% 
+  mutate(
+    pop_adj = case_when(
+      agemin == '15' ~ round(pop*2/5),
+      agemin %in% paste(seq(20,60,5)) ~ pop, 
+      TRUE ~ 0)) %>% 
+  group_by(year,GEOID) %>% 
+  summarize(pop = sum(pop), pop_adj = sum(pop_adj), .groups = 'drop') %>% 
+  mutate(pct_working = pop_adj/pop) %>% 
+  transmute(GEOID, year, pct_working) %>% 
+  rbind(working)
+
+```
+
+```{r}
+## interpolate pre-2009 based on tract:county ratio 
+
+working_county <- working %>% filter(GEOID == '06067')
+
+## download 2009-2021 tract-level data 
+working_tract_post <- map_dfr(
+  .x = 2009:2021,
+  .f = ~getCensus(
+    name = 'acs/acs5/profile', 
+    vars = 'group(DP05)', vintage = .x,
+    regionin = 'state:06+county:067', region = 'tract:*') %>% 
+    select(tract, ends_with('E')) %>% select(-state, -NAME) %>% 
+    select(-ends_with('PE')) %>% 
+    pivot_longer(starts_with('DP')) %>% 
+    left_join(
+      listCensusMetadata(name = 'acs/acs5/profile', vintage = .x) %>% 
+        select(name,label), 
+      by = 'name') %>% 
+    filter(grepl('SEX AND AGE', label)) %>% 
+    filter(!grepl('Male', label) & !grepl('Female',label) & !grepl('Sex ratio',label)) %>% 
+    mutate(
+      lab = str_split(label, 'SEX AND AGE!!') %>% 
+        lapply(function(x) x[2]) %>% reduce(c)) %>% 
+    mutate(
+      title = case_when(
+        lab == 'Total population' ~ 'total',
+        grepl('18 years and over', lab) ~ 'over18',
+        grepl('65 years and over', lab) ~ 'over65')) %>% 
+    filter(!is.na(title)) %>% 
+    group_by(tract, title) %>% 
+    summarize(value = value[1], .groups = 'drop') %>%
+    pivot_wider(names_from = title, values_from = value) %>% 
+    mutate(working = over18-over65, pct_working = working/total, year = .x)
+  ) %>% 
+  transmute(tract, year, pct_working)
+
+working_tract_pre <-
+  expand.grid(
+    year = 1980:2008,
+    tract = working_tract_post %>% filter(year == 2009) %>% pull(tract)) %>% 
+  left_join(
+    working_county %>% transmute(pct_county = pct_working, year),
+    by = 'year') %>% 
+  left_join(
+    working_tract_post %>% 
+      filter(year == 2009) %>% 
+      left_join(
+        working_county %>% transmute(pct_county = pct_working, year),
+        by = 'year') %>% 
+      mutate(ratio = pct_working/pct_county) %>% 
+      select(tract, ratio),
+    by = 'tract') %>% 
+    mutate(
+      pct_working = (pct_county*ratio) %>% 
+        cbind(1) %>% apply(1,min) %>% cbind(0) %>% apply(1,max))
+
+working_tract <-
+  rbind(
+    working_tract_pre %>% select(tract, year, pct_working), 
+    working_tract_post %>% select(tract, year, pct_working))
+
+```
+
+```{r}
+## convert old census tracts to match 2021
+working_tract <- 
+  rbind(
+    working_tract %>% 
+      filter(year < 2010) %>%
+      mutate(GEOID00 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID00') %>% 
+      group_by(GEOID20, year) %>% 
+      summarize(pct_working = Mean(pct_working)) %>% ungroup,
+    working_tract %>% 
+      filter(year %in% 2010:2019) %>%
+      mutate(GEOID10 = toNumber(paste0('06067',tract))) %>% 
+      left_join(convert, by = 'GEOID10') %>% 
+      group_by(GEOID20, year) %>% 
+      summarize(pct_working = Mean(pct_working)) %>% ungroup,
+    working_tract %>% 
+      filter(year >= 2020) %>% 
+      transmute(GEOID20 = toNumber(paste0('06067',tract)), year, pct_working)) %>% 
+  filter(GEOID20 %in% toNumber(paste0('06067', polys$name)))
+
+## check
+ggplot(working_tract) + 
+  geom_line(aes(x = year, y = pct_working, group = GEOID20), alpha = 0.25) + 
+  labs(x = 'Year', y = 'Percent of Population as Working Age (18-64)') + 
+  scale_y_continuous(labels = percent)
+
+```
+
+```{r}
+working_tract <- working_tract %>% 
+  left_join(
+    polys %>% st_drop_geometry %>% mutate(GEOID20 = toNumber(paste0('06067',name))), 
+    by = 'GEOID20')
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(year = year(start)) %>% 
+      left_join(
+        working_tract %>% filter(id == j) %>% transmute(year, pct_working), 
+        by = 'year') %>% 
+      select(-year)
+  }
+
+```
+
+## Infrastructural vulnerability
+
+### Structural age
+
+The American Community Survey (ACS) 5-year survey includes information by tract listing which decade each housing unit was built in.
+From the 2021 vintage of the survey we extract two variables: the percentage of houses built before 1980 and the median year built.
+There is no temporal variation either of these variables, which means all values are already matched with the current 2020 census tracts.
+
+```{r}
+## download ACS table DP04 (selected housing characteristics)
+profile_vars <- listCensusMetadata(name = 'acs/acs5/profile', vintage = 2021)
+dp04 <- 
+  getCensus(
+    name = 'acs/acs5/profile', 
+    vars = 'group(DP04)', vintage = 2021,
+    regionin = 'state:06+county:067', region = 'tract:*')
+
+```
+
+```{r}
+## subset DP04 to structural age information
+struct_age <- dp04 %>% 
+  select(-state, -GEO_ID, -NAME) %>% 
+  select(-ends_with('M'), -ends_with('A'), -ends_with('PE')) %>% 
+  pivot_longer(cols = ends_with('E'), names_to = 'variable', values_to = 'estimate') %>% 
+  left_join(profile_vars %>% select(name, label), by = c('variable' = 'name')) %>% 
+  mutate(label = gsub('Number!!', '', label)) %>% 
+  mutate(label = gsub('Total housing units!!', '', label)) %>% 
+  separate(label, c(NA, 'group', 'description', NA), sep = '!!', fill = 'right') %>% 
+  filter(group == 'YEAR STRUCTURE BUILT') %>% 
+  filter(description != 'Total housing units') %>% 
+  select(county, tract, description, estimate) %>% 
+  mutate(
+    begin = toNumber(str_sub(start = 7, end = 10, description)),
+    end = toNumber(str_sub(start = 15, end = 18, description))) %>% 
+  mutate(
+    end = case_when(
+      is.na(end) & grepl('later', description) ~ 2021,
+      is.na(end) & grepl('earlier', description) ~ begin,
+      TRUE ~ end),
+    begin = case_when(begin == end ~ 1900, TRUE ~ begin))
+
+## calculate median structural age
+med_age <- struct_age %>% 
+  group_by(tract) %>% 
+  arrange(end) %>% 
+  mutate(cumpct = cumsum(estimate)/sum(estimate)) %>% 
+  rbind(
+    data.frame(tract = unique(.$tract)) %>% 
+      mutate(description = NA, estimate = NA, begin = NA, end = 1900, cumpct = 0)) %>% 
+  group_by(tract) %>% mutate(count = length(begin)) %>% filter(count > 1) %>%
+  arrange(cumpct) %>% 
+  summarize(med_yearbuilt = interp1(x = cumpct, y = end, xi = 0.5), .groups = 'drop') %>% 
+  mutate(med_struct_age = 2021 - med_yearbuilt)
+
+## calculate percentage of housing over forty years old
+pct_over40 <- struct_age %>% 
+  group_by(tract) %>% 
+  arrange(end) %>% 
+  mutate(cumpct = cumsum(estimate)/sum(estimate)) %>% 
+  rbind(
+    data.frame(tract = unique(.$tract)) %>% 
+      mutate(description = NA, estimate = NA, begin = NA, end = 1900, cumpct = 0)) %>% 
+  group_by(tract) %>% mutate(count = length(begin)) %>% filter(count > 1) %>%
+  arrange(end) %>% 
+  summarize(pct_over40 = interp1(x = end, y = cumpct, xi = 2021-40), .groups = 'drop')
+
+```
+
+```{r}
+# ## calculate median year built & year built buckets
+# struct_age <- dp04 %>% 
+#   select(-state, -GEO_ID, -NAME) %>% 
+#   select(-ends_with('M'), -ends_with('A'), -ends_with('PE')) %>% 
+#   pivot_longer(cols = ends_with('E'), names_to = 'variable', values_to = 'estimate') %>% 
+#   left_join(profile_vars %>% select('name', 'label'), by = c('variable' = 'name')) %>% 
+#   separate(label, c(NA, 'group_title', 'group', 'description'), sep = '!!', fill = 'right') %>% 
+#   filter(group_title == 'YEAR STRUCTURE BUILT') %>%
+#   filter(!is.na(description)) %>% 
+#   select(tract, description, estimate) %>% 
+#   pivot_wider(id_cols = tract, names_from = description, values_from = estimate)
+# struct_age_bracket <- struct_age[,11:2] %>% 
+#   apply(1, function(x) cumsum(x)/sum(x)) %>% t %>% 
+#   data.frame %>% setNames(paste0('pre', c(seq(1940,2020,10), 2023))) %>% 
+#   cbind(tract = struct_age[,1]) %>% 
+#   select(-pre1940, -pre2010, -pre2020, -pre2023) %>% 
+#   left_join(polys %>% st_drop_geometry, by = c('tract' = 'name')) %>% 
+#   select(-area) %>% arrange(id)
+# med_struct_age <- struct_age[,11:2] %>%
+#   apply(1, function(x) cumsum(x)/sum(x)) %>% t %>% 
+#   apply(1, function(x) {
+#     c(x[last(which(x < 0.5))], last(which(x < 0.5)), x[first(which(x > 0.5))])
+#     }) %>% t %>% 
+#   as.data.frame %>% setNames(c('prop.start', 'id.start', 'prop.end')) %>% 
+#   cbind(tract = struct_age[,1]) %>% 
+#   mutate(id.start = setNA(id.start,0), id.end = id.start + 1) %>% 
+#   left_join(
+#     data.frame(year = c(seq(1939, 2009, 10), 2013, 2020), id = 1:10), 
+#     by = c('id.start' = 'id')) %>% 
+#   rename(year.start = year) %>% 
+#   left_join(
+#     data.frame(year = c(seq(1939, 2009, 10), 2013, 2020), id = 1:10), 
+#     by = c('id.end' = 'id')) %>% 
+#   rename(year.end = year) %>%
+#   mutate(
+#     med_struct_age = round(
+#       year.start + (0.5-prop.start)*(year.end-year.start)/(prop.end-prop.start))) %>% 
+#   mutate(med_struct_age = setNA(med_struct_age, 1939)) %>% 
+#   dplyr::select(tract, med_struct_age) %>% 
+#   left_join(polys %>% st_drop_geometry, by = c('tract' = 'name')) %>% 
+#   arrange(id)
+
+```
+
+```{r}
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(
+        # pre1950 = struct_age_bracket$pre1950[j],
+        # pre1960 = struct_age_bracket$pre1960[j],
+        # pre1970 = struct_age_bracket$pre1970[j],
+        # pre1980 = struct_age_bracket$pre1980[j],
+        # pre1990 = struct_age_bracket$pre1990[j],
+        # pre2000 = struct_age_bracket$pre2000[j],
+        med_struct_age = med_age$med_struct_age[j],
+        pct_over40 = pct_over40$pct_over40[j])
+  }
+
+```
+
+### Housing characteristics
+
+Beyond year built, the American Community Survey (ACS) 5-year survey also contains information on various housing characteristics of interest for our model. 
+We chose to include the percentage of housing units listed as single family homes, the percentage of housing units listed as mobile homes, and the percentage of housing units listed as owner-occupied.
+All three of these are recorded at the tract level for the 2021 survey and do not vary over time.
+
+Note: we are considering the percentage of houses that are single family homes in a given county to be an exposure variable, not a vulnerability variable, but single family home information was also drawn from the DP04 table, so it was more convenient to calculate it here rather than in the exposure section. 
+
+```{r}
+housingchar <- dp04 %>% 
+  transmute(
+    tract, 
+    hu_total = DP04_0001E, 
+    hu_sfh = DP04_0007E, 
+    hu_mobile = DP04_0014E, 
+    hu_ownocc = DP04_0046E) %>% 
+  mutate(
+    pct_sfh = hu_sfh/hu_total, 
+    pct_mobile = hu_mobile/hu_total,
+    pct_ownocc = hu_ownocc/hu_total) %>% 
+  left_join(polys %>% st_drop_geometry, by = c('tract' = 'name')) %>% 
+  arrange(id)
+
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(
+        pct_sfh = housingchar$pct_sfh[j], 
+        pct_mobile = housingchar$pct_mobile[j],
+        pct_ownocc = housingchar$pct_ownocc[j])
+  }
+
+```
+
+## Prior flood experience
+
+### Federally declared disasters in the past 3 years
+
+The Federal Emergency Management Agency (FEMA) keeps a record of all federally declared emergencies and major disasters as defined by the Stafford Act of 1988.
+We selected all flood-related major disasters in California, which we defined as events in the categories of Coastal Storm, Dam/Levee Break, Flood, and Severe Storm.
+There are 39 disaster events that meet these criteria, and every county in California has been affected by at least one of them.
+
+We downloaded the disaster data from the OpenFEMA API and assigned each disaster to the county or counties it affected.
+We then counted the number of disaster events per county per year and calculated a three-year running total to determine the number of disaster events within the past three years.
+There is no tract-level distinctions that affect federal disaster designations because the smallest unit of declaration is the county, so there is no spatial variation in this particular variable.
+The temporal variation is annual scale.
+
+```{r}
+### disaster declarations by county
+
+## get number of data points from FEMA API
+h <- handle_setopt(new_handle())
+api_call <- paste0(
+  'https://www.fema.gov/api/open/v2/DisasterDeclarationsSummaries?',
+  '$inlinecount=allpages&$top=1&$filter=state%20eq%20%27CA%27&')
+api <- curl_download(api_call, tempfile(), handle = h)
+n <- fromJSON(api)$metadata$count  #should be around 1,500
+
+## get dataset from FEMA API
+cl <- makeCluster(cores)
+registerDoSNOW(cl)
+if (progressbar) pb <- txtProgressBar(min = 0, max = floor(n/1000), style = 3)
+disasters <-
+  foreach (
+    i = 0:(n/1000),
+    .combine = 'rbind', .packages = c('httr', 'curl', 'jsonlite'),
+    .options.snow = opts) %dopar% {
+      h <- handle_setopt(new_handle())
+      api_call <- paste0(
+        'https://www.fema.gov/api/open/v2/DisasterDeclarationsSummaries?',
+        '$skip=', i*1000,
+        '&$filter=state%20eq%20%27CA%27')
+      api <- curl_download(api_call, tempfile(), handle = h)
+      fromJSON(api)$DisasterDeclarationsSummaries
+    }
+stopCluster(cl)
+
+```
+
+```{r}
+### disaster declarations by number
+
+## get number of data points from FEMA API
+h <- handle_setopt(new_handle())
+api_call <- paste0(
+  'https://www.fema.gov/api/open/v1/FemaWebDisasterDeclarations?',
+  '$inlinecount=allpages&$top=1&$filter=stateCode%20eq%20%27CA%27&')
+api <- curl_download(api_call, tempfile(), handle = h)
+n <- fromJSON(api)$metadata$count  #should be around 350
+
+## get dataset from FEMA API
+cl <- makeCluster(cores)
+registerDoSNOW(cl)
+if (progressbar) pb <- txtProgressBar(min = 0, max = max(c(1, floor(n/1000))), style = 3)
+disasters_unique <-
+  foreach (
+    i = 0:(n/1000),
+    .combine = 'rbind', .packages = c('httr', 'curl', 'jsonlite'),
+    .options.snow = opts) %dopar% {
+      h <- handle_setopt(new_handle())
+      api_call <- paste0(
+        'https://www.fema.gov/api/open/v1/FemaWebDisasterDeclarations?',
+        '$skip=', i*1000,
+        '&$filter=stateCode%20eq%20%27CA%27')
+      api <- curl_download(api_call, tempfile(), handle = h)
+      fromJSON(api)$FemaWebDisasterDeclarations
+    }
+stopCluster(cl)
+
+```
+
+```{r}
+## subset to flood-related disasters
+floodnums <- disasters_unique %>%
+  filter(incidentType %in% c('Coastal Storm', 'Dam/Levee Break', 'Flood', 'Severe Storm')) %>%
+  filter(declarationType == 'Major Disaster') %>%
+  filter(year(incidentBeginDate) > 1975) %>% 
+  pull(disasterNumber)
+
+## clean up disaster dataframe
+disasters <- disasters %>%
+  filter(disasterNumber %in% floodnums) %>%
+  transmute(
+    disasterNumber,
+    fips = 1e3*toNumber(fipsStateCode) + toNumber(fipsCountyCode),
+    incidentType, declarationType, declarationTitle,
+    start_day = as.Date(ymd_hms(incidentBeginDate)),
+    end_day = as.Date(ymd_hms(incidentEndDate)),
+    iaProgramDeclared, ihProgramDeclared, paProgramDeclared, hmProgramDeclared) %>%
+  right_join(
+    california %>% transmute(fips = toNumber(GEOID), county = NAME), .,
+    by = 'fips') %>%
+  arrange(disasterNumber) %>%
+  st_drop_geometry
+disasters_unique <- disasters_unique %>%
+  filter(disasterNumber %in% floodnums) %>%
+  transmute(
+    disasterNumber, incidentType,
+    start_day = as.Date(ymd_hms(incidentBeginDate)),
+    end_day = as.Date(ymd_hms(incidentEndDate))) %>%
+  arrange(disasterNumber)
+
+```
+
+```{r}
+disasters <- disasters %>% filter(fips == 6067)
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    disasters %>% 
+      mutate(n = 1) %>% 
+      group_by(wy = wateryear(start_day)) %>% 
+      summarize(n = sum(n)) %>% 
+      full_join(data.frame(wy = 1975:2023), by = 'wy')  %>% 
+      mutate(n = setNA(n,0)) %>% 
+      arrange(wy) %>% 
+      mutate(disasters = lag(n, agg = 3, fun = 'sum', align = 'right')) %>% 
+      select(-n) %>% 
+      left_join(catalogs[[j]] %>% mutate(wy = wateryear(start)), ., by = 'wy') %>% 
+      select(-wy)
+  }
+
+```
+
+### FEMA Community Rating Service (CRS) 
+
+The FEMA CRS is a hazard mitigation program that offers community-wide discounts on flood insurance policies in exchange for targeted flood resilience investments.
+Individual incorporated communities or entire counties can participate.
+Communities and counties enter the program with a score of 10, which is no discount.
+They can increase their ranking by getting points for different resilience actions. 
+The best possible score is 1, although the vast majority of participants do not surpass a score of 5. 
+
+We kept only counties in the program because incorporating communities significantly complicated the calculation of a county-level CRS variable.
+Similar to the FEMA disaster declarations, this variable only includes county-level variation, so within the Sacramento County dataset there is no spatial variation between tracts.
+Data on CRS program participation was pulled from a variety of sources as follows:
+
+* For years 2020-2023: we downloaded spreadsheets of participant information from the FEMA website (https://www.fema.gov/floodplain-management/community-rating-system). The website is updated with a new file every six months, so we used the Wayback Machine to retrieve files prior to April 2023.
+* For years 1998-2019: the authors submitted a FOIA request in 2020 to retrieve previous spreadsheets not available on the website.
+* For years 1990-1998: the answer to our FOIA request did not include these files because FEMA changed their records system and these are no longer available. However, the 2023 file does have information about when each county entered the program. We assigned all counties in the CRS program a score of 9 (the lowest score). 
+* For years prior to 1990: The CRS program was founded in 1990, so all values prior to the start were set to 10 (not participating) to match the length of the hazard data.
+
+```{r}
+# 1998-2019: retrieved through FOIA request
+
+crs1998 <- read_xls('_data/CRS_FOIA/(1) CRS_Historical_Rating_Data_1998 to 1999.zip5.xls', sheet = 'Oct98')
+crs1999 <- read_xls('_data/CRS_FOIA/(1) CRS_Historical_Rating_Data_1998 to 1999.zip5.xls', sheet = 'Oct99')
+
+crs2000 <- 
+  read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct00') %>% 
+  mutate(CID = NA) %>% select(CID, names(.))
+crs2001 <- 
+  read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct01') %>% 
+  mutate(CID = NA) %>% select(CID, names(.))
+crs2002 <- read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct02')
+crs2003 <- read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct03')
+crs2004 <- read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct04')
+
+crs2005 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'Oct05')
+crs2006 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'Oct06')
+crs2007 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'Oct07')
+crs2008 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'May08')
+crs2009 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'May09')
+
+crs2010 <- 
+  read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct10') %>% 
+  rename('Community Name' = 'COMMUNITY NAME')
+crs2011 <- 
+  read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct11') %>% 
+  select(-CGA) %>% rename('Community Name' = 'COMMUNITY')
+crs2012 <- read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct12') %>% 
+  rename('Community Name' = 'Name')
+crs2013 <- read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct13') %>% 
+  rename('Community Name' = 'Name')
+crs2014a <- read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct14(2007CM)')
+crs2014b <- read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct14(2013CM)')
+crs2014 <- rbind(crs2014a, crs2014b) %>% rename('Community Name' = 'Name')
+
+crs2015a <- read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct15 (2013Manual)')
+crs2015b <- read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct15 (2007Manual)')
+crs2015 <- rbind(crs2015a, crs2015b) %>% 
+  setNames(str_to_title(names(.))) %>% rename('CID' = 'Cid', 'cTot' = 'Ctotal')
+
+crs2016a <- 
+  read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct16(2007CM)') %>% 
+  transmute(CID, `Community Name` = `COMMUNITY NAME`, State = STATE, cTot = cTOTAL, Class = CLASS)
+crs2016b <- 
+  read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct16(2013CM)') %>% 
+  transmute(CID, `Community Name` = `COMMUNITY NAME`, State = STATE, cTot = cTOT, Class = CLASS)
+crs2016 <- rbind(crs2016a, crs2016b)
+
+crs2017a <- 
+  read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct17(2007CM)') %>% 
+  transmute(CID, `Community Name` = `COMMUNITY NAME`, State = STATE, cTot = cTOTAL, Class = CLASS)
+crs2017b <- 
+  read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct17(13&17CM)') %>% 
+  transmute(CID, `Community Name` = `COMMUNITY NAME`, State = STATE, cTot = cTOT, Class = CLASS)
+crs2017 <- rbind(crs2017a, crs2017b)
+
+crs2018a <- read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct18 (2007Manual)')
+crs2018b <- read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct18 (13&17CM)')
+crs2018 <- rbind(crs2018a, crs2018b) %>% 
+  setNames(str_to_title(names(.))) %>% rename('CID' = 'Cid', 'cTot' = 'Ctotal') %>% 
+  select(names(.)[1:3], cTot, Class)
+
+crs2019 <- read_xlsx('_data/CRS_FOIA/(7) CRS_Historical_Rating_Data_Oct_20196.xlsx', skip = 3, sheet = 'Oct19 (2013&2017 Manual)') %>%
+  select(-REGION) %>% 
+  setNames(str_to_title(names(.))) %>% rename('CID' = 'Cid', 'cTot' = 'Ctot')
+
+crs <- map_dfr(.x = 1998:2019, .f = ~get(paste0('crs',.x)) %>% mutate(year = .x)) %>% 
+  filter(State == 'CA')
+
+```
+
+```{r}
+# 2020-2023: available from https://www.fema.gov/floodplain-management/community-rating-system
+# (used the Wayback Machine to get 2020-2022)
+
+crs2020 <- read_xlsx('_data/CRS_FOIA/fema_crs_eligible-communities_oct-2020.xlsx', skip = 3) %>% 
+  transmute(state = State, community = `Community Name`, class = `Current Class`, year = 2020)
+crs2021a <- read_xlsx('_data/CRS_FOIA/fema_april-2021-eligible-crs-communites-excel.xlsx', skip = 3)
+crs2021b <- read_xlsx('_data/CRS_FOIA/fema_october-2021-crs-eligible-communites.xlsx')
+crs2021 <- rbind(crs2021a, crs2021b %>% setNames(names(crs2021a))) %>% 
+  transmute(state = State, community = `Community Name`, class = `Current Class`, year = 2021)
+crs2022a <- read_xlsx('_data/CRS_FOIA/fema-crs-eligible-communities_apr-2022.xlsx')
+crs2022b <- read_xlsx('_data/CRS_FOIA/fema_crs-eligible-communities_102022.xlsx')
+crs2022 <- rbind(crs2022a %>% select(-8), crs2022b %>% setNames(names(crs2022a)[-8])) %>% 
+  transmute(state = State, community = `Community Name`, class = `Current Class`, year = 2022)
+crs2023 <- read_xlsx('_data/CRS_FOIA/fema_crs-eligible-communities_042023.xlsx') %>% 
+  transmute(state = State, community = Name, class = Class, year = 2023)
+
+crs <- crs %>% 
+  transmute(state = State, community = `Community Name`, class = Class, year) %>% 
+  rbind(crs2020, crs2021, crs2022, crs2023) %>% 
+  filter(state == 'CA')
+
+```
+
+```{r}
+# pre-1998: used entry dates from 2023 & assumed all classes as 9
+
+crs.start <- read_xlsx('_data/CRS_FOIA/fema_crs-eligible-communities_042023.xlsx') %>% 
+  filter(State == 'CA') %>% 
+  filter(grepl('County', Name)) %>% 
+  filter(ymd(mdy(CRS_Entry_Date)) < '1998-01-01') %>% 
+  transmute(community = Name, entry = year(mdy(CRS_Entry_Date)))
+crs.pre1998 <- 
+  map_dfr(
+    .x = 1:nrow(crs.start),
+    .f = ~expand.grid(
+      state = 'CA',
+      community = crs.start$community[.x], 
+      year = crs.start$entry[.x]:1997, 
+      class = 9))
+
+crs <- crs %>% rbind(crs.pre1998)
+
+```
+
+```{r}
+crs <- crs %>% 
+  arrange(year) %>% 
+  filter(grepl('SACRAMENTO', str_to_upper(community))) %>% 
+  filter(grepl('COUNTY', str_to_upper(community))) %>% 
+  mutate(
+    community = community %>% str_to_upper %>% 
+      gsub('\\*', '', .) %>% gsub(', COUNTY OF', '', .) %>% gsub('COUNTY', '', .) %>% str_trim) %>% 
+  pivot_wider(id_cols = community, names_from = year, values_from = class, values_fn = Mean) %>% 
+  # pull(community) %>% unique
+  arrange(community) %>% 
+  mutate(community = str_to_title(community)) %>% 
+  pivot_longer(cols = -community, names_to = 'year', values_to = 'CRS') %>% 
+  mutate(year = toNumber(year)) %>% 
+  mutate(CRS = setNA(CRS,10))
+
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% 
+      mutate(year = year(start)) %>% 
+      left_join(crs %>% select(CRS, year), by = 'year') %>% 
+      select(-year) %>% 
+      mutate(CRS = setNA(CRS,10))
+  }
+
+```
+
+# Loss variable
+
+The outcome variable for our model is based on flood insurance claims from the FEMA National Flood Insurance Program (NFIP).
+NFIP claims were downloaded for the state of California using the OpenFEMA API.
+They are recorded by day and by census tract and are available as early as 1978.
+For each tract and each day we summarized the data into two varaibles: the total number of claims and the total value of payouts for building damage plus contents damage.
+We then matched days to AR events in our catalog to generate event-total impact and loss information.
+
+```{r}
+### download claims 
+
+## get number of claims from FEMA API
+h <- handle_setopt(new_handle())
+api_call <- paste0(
+  'https://www.fema.gov/api/open/v2/FimaNfipClaims?',
+  '$inlinecount=allpages&', '$top=1&', '$filter=state%20eq%20%27CA%27&')
+api <- curl_download(api_call, tempfile(), handle = h)
+n <- fromJSON(api)$metadata$count  #should be around 50,000
+
+## get claims dataset from FEMA API
+if (progressbar) pb <- txtProgressBar(min = 0, max = n/1000, style = 3)
+cl <- makeCluster(cores)
+registerDoSNOW(cl)
+claims <-
+  foreach (
+    i = 0:(n/1000),
+    .combine = 'rbind', .packages = c('httr', 'curl', 'jsonlite'),
+    .options.snow = opts) %dopar% {
+      h <- handle_setopt(new_handle())
+      api_call <- paste0(
+        'https://www.fema.gov/api/open/v2/FimaNfipClaims?',
+        '$skip=', i*1000,
+        '&$filter=state%20eq%20%27CA%27')
+      api <- curl_download(api_call, tempfile(), handle = h)
+      fromJSON(api)$FimaNfipClaims
+  }
+stopCluster(cl)
+
+```
+
+```{r}
+## attach tract to claims
+claims_tract <- claims %>% 
+  mutate(
+    county = str_sub(censusTract, end = 5),
+    tract = str_sub(censusTract, start = 6)) %>%
+  filter(county == '06067') %>% 
+  transmute(
+    date = as.Date(dateOfLoss), tract, 
+    building = amountPaidOnBuildingClaim, contents = amountPaidOnContentsClaim) %>% 
+  arrange(date, tract) %>% mutate(counter = 1:nrow(.)) %>% 
+  left_join(polys %>% st_drop_geometry %>% select(-area), by = c('tract' = 'name')) %>% 
+  rename(id20 = id) %>% 
+  mutate(GEOID = toNumber(paste0('06067',tract))) %>% 
+  mutate(GEOID00 = GEOID) %>% 
+  left_join(convert, by = 'GEOID00') %>% 
+  left_join(
+    polys %>% st_drop_geometry %>% 
+      transmute(id, GEOID20 = toNumber(paste0('06067',name))), by = 'GEOID20') %>% 
+  rename(id00 = id) %>% 
+  select(-GEOID00, -GEOID10, -GEOID20) %>% 
+  rename(GEOID10 = GEOID) %>% 
+  left_join(convert, by = 'GEOID10') %>% 
+  left_join(
+    polys %>% st_drop_geometry %>% 
+      transmute(id, GEOID20 = toNumber(paste0('06067',name))), by = 'GEOID20') %>% 
+  rename(id10 = id) %>% 
+  select(-starts_with('GEOID')) %>% 
+  group_by(counter) %>% 
+  mutate(n = length(counter)) %>% 
+  group_by(counter) %>% 
+  mutate(
+    id = ifelse(
+      !is.na(id20), id20[1], 
+        ifelse(
+          is.na(id00) & is.na(id20), id10[1], 
+          ifelse(
+            is.na(id10) & is.na(id20), id00[1], sample(id00,1))))) %>% 
+  summarize(across(everything(), ~.[1]))
+
+claims_tract <- claims_tract %>% 
+  group_by(tract,date) %>% 
+  summarize(
+    id = id[1],
+    claims_num = length(date),
+    claims_value = Sum(building) + Sum(contents),
+    .groups = 'drop') %>% 
+  mutate(yr = year(date)) %>% 
+  left_join(inflation.df, by = c('yr' = 'year')) %>%
+  mutate(claims_value = claims_value * adj_factor) %>%
+  select(-adj_factor, -yr) %>% 
+  mutate(claims_value = setNA(claims_value,0))
+
+```
+
+```{r}
+# claims_tract %>% 
+#   group_by(id) %>% 
+#   summarize(claims = sum(claims_num)) %>% 
+#   left_join(polys, ., by = 'id') %>% 
+#   mutate(claims = setNA(claims,0)) %>% 
+#   ggplot() + 
+#   geom_sf(aes(fill = claims)) + 
+#   scale_fill_scico(palette = 'davos', direction = -1)
+
+```
+
+```{r}
+cl <- makeCluster(cores)
+registerDoSNOW(cl)
+catalogs <- 
+  foreach (
+    j = 1:nrow(polys),
+    .packages = c('lubridate', 'tidyverse'),
+    .options.snow = opts) %dopar% {
+      claims.subset <- claims_tract %>% filter(id == j)
+      catalogs[[j]] <- catalogs[[j]] %>% mutate(claims_num = 0, claims_value = 0)
+      if (nrow(claims.subset) == 0) catalogs[[j]] else {
+        overlap <- catalogs[[j]] %>% 
+          apply(1, function(x) which(claims.subset$date %within% interval(x['start'], x['end'])))
+        overlap.length <- lapply(overlap, function(x) length(x)>0) %>% unlist
+        if (length(overlap.length)==0) catalogs[[j]] else {
+          overlap.id <- which(overlap.length)
+          for (k in overlap.id) {
+            catalogs[[j]]$claims_num[k] = Sum(claims.subset$claims_num[overlap[[k]]])
+            catalogs[[j]]$claims_value[k] = Sum(claims.subset$claims_value[overlap[[k]]])
+          } 
+          catalogs[[j]]
+        } 
+      }
+    }
+stopCluster(cl)
+
+```
+
+# Noise variable
+
+```{r}
+catalogs <- 
+  foreach (j = 1:nrow(polys)) %do% {
+    if (progressbar) setTxtProgressBar(pb,j)
+    catalogs[[j]] %>% mutate(noise = runif(nrow(.)))
+  }
+
+```
+
+# Save as single dataframe
+
+The final dataset has 145,648 individual observations recorded across 43 years and 363 census tracts. 
+There are 40 predictor variables and 2 outcome variables.
+
+```{r}
+catalog.df <- 
+  lapply(1:nrow(polys), function(j) catalogs[[j]] %>% mutate(id = j)) %>% 
+  reduce(rbind)
+
+save(catalog.df, file = '_data/_checkpoints/sac_catalog_1120.Rdata')
+write.csv(catalog.df, file = '_data/data_sacramento_1981.csv', row.names = FALSE)
+
+```
+
+

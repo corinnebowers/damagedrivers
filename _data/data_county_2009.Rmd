@@ -99,7 +99,7 @@ We then combined the individual time intervals labeled as ARs into cohesive AR e
 
 ```{r}
 # ## load AR information by grid cell
-# load('D:/2-sequences/_scripts/_checkpoints/df_3hr_1209.Rdata')
+# load('D:/02-sequences/_scripts/_checkpoints/df_3hr_1209.Rdata')
 # 
 # ## define AR threshold 
 # # (percentage of grid cells that need to agree to label a time interval as an AR)
@@ -754,6 +754,7 @@ cdc_svi <-
 cdc_svi %>% 
   rbind(cdc_svi %>% filter(year == 2000) %>% mutate(year = 1980)) %>% 
   rbind(cdc_svi %>% filter(year == 2020) %>% mutate(year = 2022)) %>% 
+  filter(year >= 2009) %>% 
   select(-id) %>% 
   pivot_longer(c(-year, -county)) %>% 
   ggplot() + 
@@ -1314,69 +1315,67 @@ Data on CRS program participation was pulled from a variety of sources as follow
 ```{r}
 # 1998-2019: retrieved through FOIA request
 
-setwd('D:/Research/_data/losses/CRS_FOIA')
-
-crs1998 <- read_xls('(1) CRS_Historical_Rating_Data_1998 to 1999.zip5.xls', sheet = 'Oct98')
-crs1999 <- read_xls('(1) CRS_Historical_Rating_Data_1998 to 1999.zip5.xls', sheet = 'Oct99')
+crs1998 <- read_xls('_data/CRS_FOIA/(1) CRS_Historical_Rating_Data_1998 to 1999.zip5.xls', sheet = 'Oct98')
+crs1999 <- read_xls('_data/CRS_FOIA/(1) CRS_Historical_Rating_Data_1998 to 1999.zip5.xls', sheet = 'Oct99')
 
 crs2000 <- 
-  read_xls('(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct00') %>% 
+  read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct00') %>% 
   mutate(CID = NA) %>% select(CID, names(.))
 crs2001 <- 
-  read_xls('(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct01') %>% 
+  read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct01') %>% 
   mutate(CID = NA) %>% select(CID, names(.))
-crs2002 <- read_xls('(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct02')
-crs2003 <- read_xls('(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct03')
-crs2004 <- read_xls('(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct04')
+crs2002 <- read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct02')
+crs2003 <- read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct03')
+crs2004 <- read_xls('_data/CRS_FOIA/(2) CRS_Historical_Rating_Data_2000 to 2004.zip4.xls', sheet = 'Oct04')
 
-crs2005 <- read_xls('(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'Oct05')
-crs2006 <- read_xls('(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'Oct06')
-crs2007 <- read_xls('(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'Oct07')
-crs2008 <- read_xls('(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'May08')
-crs2009 <- read_xls('(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'May09')
+crs2005 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'Oct05')
+crs2006 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'Oct06')
+crs2007 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'Oct07')
+crs2008 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'May08')
+crs2009 <- read_xls('_data/CRS_FOIA/(3) CRS_Historical_Rating_Data_2005 to 2009_.zip3.xls', sheet = 'May09')
 
 crs2010 <- 
-  read_xlsx('(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct10') %>% 
+  read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct10') %>% 
   rename('Community Name' = 'COMMUNITY NAME')
 crs2011 <- 
-  read_xlsx('(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct11') %>% 
+  read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct11') %>% 
   select(-CGA) %>% rename('Community Name' = 'COMMUNITY')
-crs2012 <- read_xlsx('(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct12') %>% 
+crs2012 <- read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct12') %>% 
   rename('Community Name' = 'Name')
-crs2013 <- read_xlsx('(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct13') %>% 
+crs2013 <- read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct13') %>% 
   rename('Community Name' = 'Name')
-crs2014a <- read_xlsx('(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct14(2007CM)')
-crs2014b <- read_xlsx('(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct14(2013CM)')
+crs2014a <- read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct14(2007CM)')
+crs2014b <- read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct14(2013CM)')
 crs2014 <- rbind(crs2014a, crs2014b) %>% rename('Community Name' = 'Name')
 
-crs2015a <- read_xlsx('(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct15 (2013Manual)')
-crs2015b <- read_xlsx('(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct15 (2007Manual)')
+crs2015a <- read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct15 (2013Manual)')
+crs2015b <- read_xlsx('_data/CRS_FOIA/(4) CRS_Historical_Rating_Data_2010 to 20152.xlsx', sheet = 'Oct15 (2007Manual)')
 crs2015 <- rbind(crs2015a, crs2015b) %>% 
   setNames(str_to_title(names(.))) %>% rename('CID' = 'Cid', 'cTot' = 'Ctotal')
 
 crs2016a <- 
-  read_xlsx('(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct16(2007CM)') %>% 
+  read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct16(2007CM)') %>% 
   transmute(CID, `Community Name` = `COMMUNITY NAME`, State = STATE, cTot = cTOTAL, Class = CLASS)
 crs2016b <- 
-  read_xlsx('(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct16(2013CM)') %>% 
+  read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct16(2013CM)') %>% 
   transmute(CID, `Community Name` = `COMMUNITY NAME`, State = STATE, cTot = cTOT, Class = CLASS)
 crs2016 <- rbind(crs2016a, crs2016b)
 
 crs2017a <- 
-  read_xlsx('(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct17(2007CM)') %>% 
+  read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct17(2007CM)') %>% 
   transmute(CID, `Community Name` = `COMMUNITY NAME`, State = STATE, cTot = cTOTAL, Class = CLASS)
 crs2017b <- 
-  read_xlsx('(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct17(13&17CM)') %>% 
+  read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct17(13&17CM)') %>% 
   transmute(CID, `Community Name` = `COMMUNITY NAME`, State = STATE, cTot = cTOT, Class = CLASS)
 crs2017 <- rbind(crs2017a, crs2017b)
 
-crs2018a <- read_xlsx('(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct18 (2007Manual)')
-crs2018b <- read_xlsx('(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct18 (13&17CM)')
+crs2018a <- read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct18 (2007Manual)')
+crs2018b <- read_xlsx('_data/CRS_FOIA/(5) CRS_Historical_Rating_Data_2014 to 20188.xlsx', sheet = 'Oct18 (13&17CM)')
 crs2018 <- rbind(crs2018a, crs2018b) %>% 
   setNames(str_to_title(names(.))) %>% rename('CID' = 'Cid', 'cTot' = 'Ctotal') %>% 
   select(names(.)[1:3], cTot, Class)
 
-crs2019 <- read_xlsx('(7) CRS_Historical_Rating_Data_Oct_20196.xlsx', skip = 3, sheet = 'Oct19 (2013&2017 Manual)') %>% 
+crs2019 <- read_xlsx('_data/CRS_FOIA/(7) CRS_Historical_Rating_Data_Oct_20196.xlsx', skip = 3, sheet = 'Oct19 (2013&2017 Manual)') %>%
   select(-REGION) %>% 
   setNames(str_to_title(names(.))) %>% rename('CID' = 'Cid', 'cTot' = 'Ctot')
 
@@ -1389,17 +1388,17 @@ crs <- map_dfr(.x = 1998:2019, .f = ~get(paste0('crs',.x)) %>% mutate(year = .x)
 # 2020-2023: available from https://www.fema.gov/floodplain-management/community-rating-system
 # (used the Wayback Machine to get 2020-2022)
 
-setwd('D:/Research/_data/losses/CRS_FOIA')
-
-crs2020 <- read_xlsx('fema_crs_eligible-communities_oct-2020.xlsx', skip = 3) %>% 
+crs2020 <- read_xlsx('_data/CRS_FOIA/fema_crs_eligible-communities_oct-2020.xlsx', skip = 3) %>% 
   transmute(state = State, community = `Community Name`, class = `Current Class`, year = 2020)
-crs2021a <- read_xlsx('fema_april-2021-eligible-crs-communites-excel.xlsx', skip = 3)
-crs2021b <- read_xlsx('fema_october-2021-crs-eligible-communites.xlsx')
+crs2021a <- read_xlsx('_data/CRS_FOIA/fema_april-2021-eligible-crs-communites-excel.xlsx', skip = 3)
+crs2021b <- read_xlsx('_data/CRS_FOIA/fema_october-2021-crs-eligible-communites.xlsx')
 crs2021 <- rbind(crs2021a, crs2021b %>% setNames(names(crs2021a))) %>% 
   transmute(state = State, community = `Community Name`, class = `Current Class`, year = 2021)
-crs2022 <- read_xlsx('fema-crs-eligible-communities_apr-2022.xlsx') %>% 
+crs2022a <- read_xlsx('_data/CRS_FOIA/fema-crs-eligible-communities_apr-2022.xlsx')
+crs2022b <- read_xlsx('_data/CRS_FOIA/fema_crs-eligible-communities_102022.xlsx')
+crs2022 <- rbind(crs2022a %>% select(-8), crs2022b %>% setNames(names(crs2022a)[-8])) %>% 
   transmute(state = State, community = `Community Name`, class = `Current Class`, year = 2022)
-crs2023 <- read_xlsx('fema_crs-eligible-communities_042023.xlsx', skip = 2) %>% 
+crs2023 <- read_xlsx('_data/CRS_FOIA/fema_crs-eligible-communities_042023.xlsx') %>% 
   transmute(state = State, community = Name, class = Class, year = 2023)
 
 crs <- crs %>% 
@@ -1412,13 +1411,11 @@ crs <- crs %>%
 ```{r}
 # pre-1998: used entry dates from 2023 & assumed all classes as 9
 
-setwd('D:/Research/_data/losses/CRS_FOIA')
-
-crs.start <- read_xlsx('fema_crs-eligible-communities_042023.xlsx', skip = 2) %>% 
+crs.start <- read_xlsx('_data/CRS_FOIA/fema_crs-eligible-communities_042023.xlsx') %>% 
   filter(State == 'CA') %>% 
   filter(grepl('County', Name)) %>% 
-  filter(ymd(CRS_Entry_Date) < '1998-01-01') %>% 
-  transmute(community = Name, entry = year(CRS_Entry_Date))
+  filter(ymd(mdy(CRS_Entry_Date)) < '1998-01-01') %>% 
+  transmute(community = Name, entry = year(mdy(CRS_Entry_Date)))
 crs.pre1998 <- 
   map_dfr(
     .x = 1:nrow(crs.start),
@@ -1437,15 +1434,16 @@ crs <- crs %>% rbind(crs.pre1998)
 crs <- crs %>% 
   arrange(year) %>% 
   filter(grepl('COUNTY', str_to_upper(community))) %>% 
-  mutate(community = ifelse(community == 'YOLO COUNTY UNINC AREAS', 'YOLO COUNTY', community)) %>% 
+  mutate(community = ifelse(community == 'YOLO COUNTY *UNINC AREAS', 'YOLO COUNTY', community)) %>% 
   mutate(
     community = community %>% str_to_upper %>% 
       gsub('\\*', '', .) %>% gsub(', COUNTY OF', '', .) %>% gsub('COUNTY', '', .) %>% str_trim) %>% 
-  pivot_wider(id_cols = community, names_from = year, values_from = class, values_fn = 'Mean') %>% 
+  # pull(community) %>% unique
+  pivot_wider(id_cols = community, names_from = year, values_from = class, values_fn = Mean) %>% 
   arrange(community) %>% 
   mutate(community = str_to_title(community)) %>% 
   pivot_longer(cols = -community, names_to = 'year', values_to = 'CRS') %>% 
-  mutate(year = toNumber(year)) %>% 
+  mutate(year = toNumber(year)) %>%
   full_join(
     expand.grid(community = polys$name, year = 1991:2022), 
     by = c('community', 'year')) %>% 
@@ -1483,7 +1481,7 @@ We then matched days to AR events in our catalog to generate event-total impact 
 ## get number of claims from FEMA API
 h <- handle_setopt(new_handle())
 api_call <- paste0(
-  'https://www.fema.gov/api/open/v1/FimaNfipClaims?',
+  'https://www.fema.gov/api/open/v2/FimaNfipClaims?',
   '$inlinecount=allpages&', '$top=1&', '$filter=state%20eq%20%27CA%27&')
 api <- curl_download(api_call, tempfile(), handle = h)
 n <- fromJSON(api)$metadata$count  #should be around 50,000
@@ -1499,7 +1497,7 @@ claims <-
     .options.snow = opts) %dopar% {
       h <- handle_setopt(new_handle())
       api_call <- paste0(
-        'https://www.fema.gov/api/open/v1/FimaNfipClaims?',
+        'https://www.fema.gov/api/open/v2/FimaNfipClaims?',
         '$skip=', i*1000,
         '&$filter=state%20eq%20%27CA%27')
       api <- curl_download(api_call, tempfile(), handle = h)
@@ -1573,16 +1571,17 @@ catalogs <-
 
 # Save as single dataframe
 
+The final dataset has 5,659 individual observations recorded across 43 years and 58 counties. 
+There are 40 predictor variables and 2 outcome variables.
+
 ```{r}
 catalog.df <- 
   lapply(1:nrow(polys), function(j) catalogs[[j]] %>% mutate(id = j)) %>% 
   reduce(rbind) %>% 
   filter(year(start) >= 2009)
 
-# temp <- apply(catalog.df, 2, sum.na)
-# temp[temp>0]
-
-save(catalog.df, file = '_data/_checkpoints/county2009_catalog_0705.Rdata')
+save(catalog.df, file = '_data/_checkpoints/county2009_catalog_1120.Rdata')
+write.csv(catalog.df, file = '_data/data_county_2009.csv', row.names = FALSE)
 
 ```
 
